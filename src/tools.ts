@@ -626,23 +626,16 @@ export function checkPermission(
   mode: PermissionMode = "default",
   planFilePath?: string
 ): { action: "allow" | "deny" | "confirm"; message?: string } {
-  // bypassPermissions (--yolo): allow everything
-  if (mode === "bypassPermissions") return { action: "allow" };
-
-  // Step 1: Check permission rules from settings (deny rules override even modes)
+  // Step 1: Deny rules always win — even bypassPermissions (--yolo) is
+  // constrained by deny rules (docs/06-permissions.md), so check them before
+  // any mode shortcut.
   const ruleResult = checkPermissionRules(toolName, input);
   if (ruleResult === "deny") {
     return { action: "deny", message: `Denied by permission rule for ${toolName}` };
   }
-  if (ruleResult === "allow") {
-    return { action: "allow" };
-  }
 
-  // Step 2: Mode-specific logic
-  // Read tools are always allowed in all modes
-  if (READ_TOOLS.has(toolName)) return { action: "allow" };
-
-  // plan mode: block all write/edit tools (except plan file) and shell
+  // Step 2: Plan mode's read-only contract beats allow rules and bypass:
+  // only the plan file itself is writable, and shell stays blocked (docs/10).
   if (mode === "plan") {
     if (EDIT_TOOLS.has(toolName)) {
       const filePath = input.file_path || input.path;

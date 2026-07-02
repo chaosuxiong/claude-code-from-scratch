@@ -1081,6 +1081,17 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       const budget = this.checkBudget();
       if (budget.exceeded) {
         printInfo(`Budget exceeded: ${budget.reason}`);
+        // Every tool_use needs a paired tool_result or the message history
+        // is invalid for the next API call. Pair each pending call with a
+        // refusal instead of silently dropping it.
+        this.anthropicMessages.push({
+          role: "user",
+          content: toolUses.map((tu) => ({
+            type: "tool_result" as const,
+            tool_use_id: tu.id,
+            content: `Tool call not executed: ${budget.reason}`,
+          })),
+        });
         break;
       }
 
@@ -1312,6 +1323,15 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       const budget = this.checkBudget();
       if (budget.exceeded) {
         printInfo(`Budget exceeded: ${budget.reason}`);
+        // Same pairing requirement as the Anthropic path: every tool_call
+        // needs a role:"tool" response.
+        for (const tc of toolCalls) {
+          this.openaiMessages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: `Tool call not executed: ${budget.reason}`,
+          });
+        }
         break;
       }
 

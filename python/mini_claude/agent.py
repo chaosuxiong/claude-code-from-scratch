@@ -933,6 +933,16 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             budget = self._check_budget()
             if budget["exceeded"]:
                 print_info(f"Budget exceeded: {budget['reason']}")
+                # Every tool_use needs a paired tool_result or the message
+                # history is invalid for the next API call. Pair each pending
+                # call with a refusal instead of silently dropping it.
+                for task in early_executions.values():
+                    task.cancel()
+                self._anthropic_messages.append({"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": tu.id,
+                     "content": f"Tool call not executed: {budget['reason']}"}
+                    for tu in tool_uses
+                ]})
                 break
 
             # Process tools: early-started ones (from streaming) just await
@@ -1139,6 +1149,15 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             budget = self._check_budget()
             if budget["exceeded"]:
                 print_info(f"Budget exceeded: {budget['reason']}")
+                # Same pairing requirement as the Anthropic path: every
+                # tool_call needs a role="tool" response.
+                for tc in tool_calls:
+                    if tc.get("id"):
+                        self._openai_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": f"Tool call not executed: {budget['reason']}",
+                        })
                 break
 
             # Phase 1: Parse & permission-check (serial)

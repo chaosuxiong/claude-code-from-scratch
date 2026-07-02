@@ -576,18 +576,15 @@ def check_permission(
     plan_file_path: str | None = None,
 ) -> dict:
     """Returns {"action": "allow"|"deny"|"confirm", "message": ...}"""
-    if mode == "bypassPermissions":
-        return {"action": "allow"}
-
+    # Deny rules always win — even bypassPermissions (--yolo) is constrained
+    # by deny rules (docs/06-permissions.md), so check them before any mode
+    # shortcut.
     rule_result = _check_permission_rules(tool_name, inp)
     if rule_result == "deny":
         return {"action": "deny", "message": f"Denied by permission rule for {tool_name}"}
-    if rule_result == "allow":
-        return {"action": "allow"}
 
-    if tool_name in READ_TOOLS:
-        return {"action": "allow"}
-
+    # Plan mode's read-only contract beats allow rules and bypass: only the
+    # plan file itself is writable, and shell stays blocked (docs/10).
     if mode == "plan":
         if tool_name in EDIT_TOOLS:
             file_path = inp.get("file_path") or inp.get("path")
