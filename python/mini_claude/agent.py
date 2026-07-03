@@ -850,6 +850,12 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
     # ─── Anthropic backend ───────────────────────────────────────
 
+    async def close(self) -> None:
+        """Release external resources (MCP subprocesses) for a clean exit —
+        see issue #8."""
+        if self._mcp_initialized:
+            await self._mcp_manager.disconnect_all()
+
     def _consume_memory_prefetch_if_ready(self, messages: list) -> None:
         """Inject recalled memories if the prefetch settled (non-blocking).
         Appends to the last user message to keep user/assistant alternation."""

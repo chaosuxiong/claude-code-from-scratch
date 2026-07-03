@@ -799,6 +799,14 @@ export class Agent {
     } catch { /* prefetch errors already logged */ }
   }
 
+  // Release external resources (MCP subprocesses and their timers) so the
+  // Node process can exit cleanly — see issue #8.
+  async close(): Promise<void> {
+    if (this.mcpInitialized) {
+      await this.mcpManager.disconnectAll();
+    }
+  }
+
   private async startMemoryPrefetchForTurn(userMessage: string, messages: any[]): Promise<void> {
     // Drain any carry-over prefetch from the previous turn — a recall that
     // settled after that turn's last API call would otherwise be dropped

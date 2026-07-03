@@ -165,7 +165,10 @@ async function runRepl(agent: Agent) {
       sigintCount++;
       if (sigintCount >= 2) {
         console.log("\nBye!\n");
-        process.exit(0);
+        // Disconnect MCP first or lingering subprocesses/timers keep the
+        // process alive (issue #8)
+        agent.close().finally(() => process.exit(0));
+        return;
       }
       console.log("\n  Press Ctrl+C again to exit.");
       printUserPrompt();
@@ -187,6 +190,7 @@ async function runRepl(agent: Agent) {
       if (input === "exit" || input === "quit") {
         console.log("\nBye!\n");
         rl.close();
+        await agent.close();
         process.exit(0);
       }
 
@@ -361,6 +365,10 @@ async function main() {
     } catch (e: any) {
       printError(e.message);
       process.exit(1);
+    } finally {
+      // Without this, MCP subprocesses/timers keep the one-shot process
+      // alive after the answer is printed (issue #8)
+      await agent.close();
     }
   } else {
     // Interactive REPL mode

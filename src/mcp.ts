@@ -29,6 +29,23 @@ interface McpToolInfo {
   serverName: string;
 }
 
+// Race a promise against a timeout WITHOUT leaking the timer: a bare
+// Promise.race leaves the setTimeout pending after the promise wins,
+// which keeps the Node event loop (and thus the process) alive.
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, rej) => {
+        timer = setTimeout(() => rej(new Error("timeout")), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ─── Single MCP connection (one per server) ─────────────────
 
 class McpConnection {
@@ -169,14 +186,8 @@ export class McpManager {
       const conn = new McpConnection(name, config);
       try {
         await conn.connect();
-        await Promise.race([
-          conn.initialize(),
-          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), TIMEOUT_MS)),
-        ]);
-        const serverTools = await Promise.race([
-          conn.listTools(),
-          new Promise<McpToolInfo[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), TIMEOUT_MS)),
-        ]);
+        await withTimeout(conn.initialize(), TIMEOUT_MS);
+        const serverTools = await withTimeout(conn.listTools(), TIMEOUT_MS);
         this.connections.set(name, conn);
         this.tools.push(...serverTools);
         console.error(`[mcp] Connected to '${name}' — ${serverTools.length} tools`);

@@ -190,6 +190,9 @@ async def run_repl(agent: Agent) -> None:
             if "abort" not in str(e).lower():
                 print_error(str(e))
 
+    # Loop exited (EOF / exit / quit) — release MCP subprocesses (issue #8)
+    await agent.close()
+
 
 def main() -> None:
     args = parse_args()
@@ -294,9 +297,15 @@ Examples:
     prompt = " ".join(args.prompt) if args.prompt else None
 
     if prompt:
-        # One-shot mode
+        # One-shot mode — always release MCP subprocesses on the way out
+        # (issue #8)
+        async def _one_shot() -> None:
+            try:
+                await agent.chat(prompt)
+            finally:
+                await agent.close()
         try:
-            asyncio.run(agent.chat(prompt))
+            asyncio.run(_one_shot())
         except Exception as e:
             print_error(str(e))
             sys.exit(1)
