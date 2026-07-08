@@ -30,9 +30,92 @@ graph TB
     style Block fill:#ff6b6b,color:#fff
 ```
 
+> ▶ **Run this chapter**: `node steps/run.mjs 6` (no API key) — watch it block an `rm -rf`. Add `--diff` to see what it added over the previous chapter.
+
 Core approach: **deny takes priority, and even `--yolo` can't get past it**. deny rules first, then plan mode's read-only contract, and only then bypass / allow rules / built-in danger detection / session whitelist / user confirmation.
 
 ## Our Implementation
+
+Last chapter's agent ran whatever tool the model asked for, no questions asked — including `rm -rf`. This chapter adds a permission gate: every tool call is checked first, and a dangerous one is blocked before it ever runs. Relative to last chapter, it adds a `permissions.ts`, and the agent loop checks before executing a tool:
+
+<!-- @diff file=agent.ts step=6 lang=ts -->
+```diff
+@@ -2,4 +2,5 @@ import Anthropic from "@anthropic-ai/sdk";
+ import { toolDefinitions, executeTool } from "./tools.js";
+ import { buildSystemPrompt } from "./prompt.js";
++import { checkPermission } from "./permissions.js";
+ 
+ const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
+@@ -56,5 +57,8 @@ export class Agent {
+       for (const tu of toolUses) {
+         console.log(`  → ${tu.name}(${JSON.stringify(tu.input)})`);
+-        const output = await executeTool(tu.name, tu.input as Record<string, any>);
++        // Check permission before running the tool; a denied call never runs.
++        const output = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
++          ? `Denied: ${tu.name} was blocked by the permission system.`
++          : await executeTool(tu.name, tu.input as Record<string, any>);
+         results.push({ type: "tool_result", tool_use_id: tu.id, content: output });
+       }
+```
+<!-- @enddiff -->
+
+The gate itself is a list of dangerous commands plus one check:
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=permissions.ts region=permissions step=6 -->
+```typescript
+const DANGEROUS = [
+  /\brm\s+-rf\b/,
+  /\bgit\s+push\b/,
+  /\bgit\s+reset\s+--hard\b/,
+  /\bsudo\b/,
+  /\bmkfs\b/,
+  />\s*\/dev\//,
+];
+
+export function checkPermission(name: string, input: Record<string, any>): "allow" | "deny" {
+  if (name === "run_shell" && DANGEROUS.some((re) => re.test(String(input.command || "")))) {
+    return "deny";
+  }
+  return "allow";
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=permissions.py region=permissions step=6 -->
+```python
+_DANGEROUS = [
+    r"\brm\s+-rf\b",
+    r"\bgit\s+push\b",
+    r"\bgit\s+reset\s+--hard\b",
+    r"\bsudo\b",
+    r"\bmkfs\b",
+    r">\s*/dev/",
+]
+
+
+def check_permission(name: str, inp: dict) -> str:
+    if name == "run_shell" and any(re.search(p, str(inp.get("command", ""))) for p in _DANGEROUS):
+        return "deny"
+    return "allow"
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+Run it: the model wants `rm -rf`, the gate blocks it, nothing is deleted:
+
+<!-- @transcript step=6 lang=ts -->
+```
+$ node steps/run.mjs 6
+▶ step 6 demo (no API key — local mock model)   sandbox: <sandbox>
+  you: Delete everything in /tmp/demo with rm -rf.
+
+I'll remove it.
+  → run_shell({"command":"rm -rf /tmp/demo"})
+That was blocked by the permission system, so nothing was deleted.
+```
+<!-- @endtranscript -->
 
 We simplify the 7 layers down to **4 layers**: dangerous command detection, permission rule system, unified permission check, and session-level whitelist. The 8 rule sources are simplified to **2** (user-level + project-level), and the 3 rule behaviors are simplified to **2** (allow + deny).
 

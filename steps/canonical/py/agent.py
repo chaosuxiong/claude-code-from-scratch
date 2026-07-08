@@ -7,6 +7,9 @@ from tools import tool_definitions, execute_tool
 #step >=3
 from prompt import build_system_prompt
 #endstep
+#step >=6
+from permissions import check_permission
+#endstep
 
 MODEL = os.environ.get("MINI_MODEL", "claude-sonnet-4-5-20250929")
 
@@ -74,7 +77,15 @@ class Agent:
             results = []
             for tu in tool_uses:
                 print(f"  → {tu.name}({json.dumps(tu.input)})")
+#step >=6
+                # Check permission before running the tool; a denied call never runs.
+                if check_permission(tu.name, tu.input) == "deny":
+                    output = f"Denied: {tu.name} was blocked by the permission system."
+                else:
+                    output = execute_tool(tu.name, tu.input)
+#step <=5
                 output = execute_tool(tu.name, tu.input)
+#endstep
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "content": output})
             self.messages.append({"role": "user", "content": results})
 #endregion

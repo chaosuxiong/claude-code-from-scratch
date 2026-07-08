@@ -59,5 +59,17 @@
       ],
       "finalStopReason": "end_turn"
     }
+  },
+  "6": {
+    "scenario": "blocked-command",
+    "expect": {
+      "toolCalls": [
+        "run_shell"
+      ],
+      "toolResultsContain": [
+        "Denied"
+      ],
+      "finalStopReason": "end_turn"
+    }
   }
 }

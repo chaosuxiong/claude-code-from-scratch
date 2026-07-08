@@ -3,6 +3,9 @@ import { toolDefinitions, executeTool } from "./tools.js";
 //#step >=3
 import { buildSystemPrompt } from "./prompt.js";
 //#endstep
+//#step >=6
+import { checkPermission } from "./permissions.js";
+//#endstep
 
 const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
 
@@ -76,7 +79,14 @@ export class Agent {
       const results: Anthropic.ToolResultBlockParam[] = [];
       for (const tu of toolUses) {
         console.log(`  → ${tu.name}(${JSON.stringify(tu.input)})`);
+//#step >=6
+        // Check permission before running the tool; a denied call never runs.
+        const output = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
+          ? `Denied: ${tu.name} was blocked by the permission system.`
+          : await executeTool(tu.name, tu.input as Record<string, any>);
+//#step <=5
         const output = await executeTool(tu.name, tu.input as Record<string, any>);
+//#endstep
         results.push({ type: "tool_result", tool_use_id: tu.id, content: output });
       }
       this.messages.push({ role: "user", content: results });

@@ -25,6 +25,7 @@ const STEPS = [
   { n: 3, name: "03-system-prompt" },
   { n: 4, name: "04-cli-session" },
   { n: 5, name: "05-streaming" },
+  { n: 6, name: "06-permissions" },
 ];
 
 // Each file, and the first step at which it exists.
@@ -35,6 +36,7 @@ const FILES = {
     { file: "cli.ts", from: 1 },
     { file: "prompt.ts", from: 3 },
     { file: "session.ts", from: 4 },
+    { file: "permissions.ts", from: 6 },
   ],
   py: [
     { file: "agent.py", from: 1 },
@@ -42,6 +44,7 @@ const FILES = {
     { file: "__main__.py", from: 1 },
     { file: "prompt.py", from: 3 },
     { file: "session.py", from: 4 },
+    { file: "permissions.py", from: 6 },
   ],
 };
 

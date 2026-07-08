@@ -30,9 +30,92 @@ graph TB
     style Block fill:#ff6b6b,color:#fff
 ```
 
+> ▶ **跑这一章**：`node steps/run.mjs 6`（无需 API key）——看它把一条 `rm -rf` 拦下来。加 `--diff` 看它比上一章多了什么。
+
 核心思路：**deny 优先，连 `--yolo` 也拦得住**。先查 deny 规则，再看 plan 的只读契约，然后才轮到 bypass / allow 规则 / 内置危险检测 / 会话白名单 / 用户确认。
 
 ## 我们的实现
+
+上一章的 agent 会无条件执行模型要调的任何工具——包括 `rm -rf`。这一章给它加一道权限闸：每次调工具前先过一遍检查，危险的直接拦下、根本不执行。相对上一章，新增了一个 `permissions.ts`，agent 循环里执行工具前插了一次检查：
+
+<!-- @diff file=agent.ts step=6 lang=ts -->
+```diff
+@@ -2,4 +2,5 @@ import Anthropic from "@anthropic-ai/sdk";
+ import { toolDefinitions, executeTool } from "./tools.js";
+ import { buildSystemPrompt } from "./prompt.js";
++import { checkPermission } from "./permissions.js";
+ 
+ const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
+@@ -56,5 +57,8 @@ export class Agent {
+       for (const tu of toolUses) {
+         console.log(`  → ${tu.name}(${JSON.stringify(tu.input)})`);
+-        const output = await executeTool(tu.name, tu.input as Record<string, any>);
++        // Check permission before running the tool; a denied call never runs.
++        const output = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
++          ? `Denied: ${tu.name} was blocked by the permission system.`
++          : await executeTool(tu.name, tu.input as Record<string, any>);
+         results.push({ type: "tool_result", tool_use_id: tu.id, content: output });
+       }
+```
+<!-- @enddiff -->
+
+闸门本身就是一张危险命令清单加一个判断：
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=permissions.ts region=permissions step=6 -->
+```typescript
+const DANGEROUS = [
+  /\brm\s+-rf\b/,
+  /\bgit\s+push\b/,
+  /\bgit\s+reset\s+--hard\b/,
+  /\bsudo\b/,
+  /\bmkfs\b/,
+  />\s*\/dev\//,
+];
+
+export function checkPermission(name: string, input: Record<string, any>): "allow" | "deny" {
+  if (name === "run_shell" && DANGEROUS.some((re) => re.test(String(input.command || "")))) {
+    return "deny";
+  }
+  return "allow";
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=permissions.py region=permissions step=6 -->
+```python
+_DANGEROUS = [
+    r"\brm\s+-rf\b",
+    r"\bgit\s+push\b",
+    r"\bgit\s+reset\s+--hard\b",
+    r"\bsudo\b",
+    r"\bmkfs\b",
+    r">\s*/dev/",
+]
+
+
+def check_permission(name: str, inp: dict) -> str:
+    if name == "run_shell" and any(re.search(p, str(inp.get("command", ""))) for p in _DANGEROUS):
+        return "deny"
+    return "allow"
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+跑一下，模型想 `rm -rf`，闸门拦下、什么都没删：
+
+<!-- @transcript step=6 lang=ts -->
+```
+$ node steps/run.mjs 6
+▶ step 6 demo (no API key — local mock model)   sandbox: <sandbox>
+  you: Delete everything in /tmp/demo with rm -rf.
+
+I'll remove it.
+  → run_shell({"command":"rm -rf /tmp/demo"})
+That was blocked by the permission system, so nothing was deleted.
+```
+<!-- @endtranscript -->
 
 把 7 层简化为 **4 层**：危险命令检测、权限规则系统、统一权限检查、会话级白名单。8 种规则来源简化为 **2 种**（用户级 + 项目级），3 种规则行为简化为 **2 种**（allow + deny）。
 

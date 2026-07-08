@@ -29,6 +29,7 @@ const STEP_INFO = {
   3: "system prompt — behave like a coding agent",
   4: "CLI & sessions — arg parsing, /clear, save & --resume a conversation",
   5: "streaming — the model call becomes a stream; text appears as it is generated",
+  6: "permissions — a gate checks each tool call; dangerous shell commands are blocked",
 };
 
 const args = process.argv.slice(2);
