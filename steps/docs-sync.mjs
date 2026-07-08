@@ -62,8 +62,11 @@ function diffBlock(file, step, lang) {
   if (!prev) throw new Error(`@diff needs a previous step (step ${step})`);
   const r = spawnSync("git", ["--no-pager", "diff", "--no-index", "--unified=2", "--",
     join(DIST, prev, lang, file), join(DIST, cur, lang, file)], { encoding: "utf-8" });
-  // keep only hunks (drop the diff/index/+++/--- header lines so paths/temp don't leak)
-  const body = (r.stdout || "").split("\n").filter((l) => /^[-+ @]/.test(l) && !/^(\+\+\+|---)/.test(l)).join("\n");
+  // keep only hunks (drop the diff/index/+++/--- header so paths don't leak), and
+  // drop doc-only #region/#step marker comment lines so they don't show to readers.
+  const isMarker = (l) => /^[-+ ]\s*(?:\/\/#|#)(?:region|endregion|step|endstep)\b/.test(l);
+  const body = (r.stdout || "").split("\n")
+    .filter((l) => /^[-+ @]/.test(l) && !/^(\+\+\+|---)/.test(l) && !isMarker(l)).join("\n");
   return body.trim();
 }
 

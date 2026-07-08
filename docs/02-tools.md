@@ -39,9 +39,202 @@ graph LR
     style RF fill:#e8e0ff
 ```
 
+> ▶ **跑这一章**：`node steps/run.mjs 2`（无需 API key，走本地 mock 模型）。加 `--py` 跑 Python 版；加 `--diff` 看它比上一章多了什么。
+
 ## 我们的实现
 
 一个工具三样东西：名字、给模型看的说明、干活的函数。前两样写在一个静态数组里（直接就是发给 API 的格式），第三样写成一个普通函数，再用一个 switch 把名字分派到函数。先看定义，再看执行，最后逐个工具过一遍——重点在 `edit_file`，它是这章唯一有坑的工具。
+
+上一章的 agent 只有 `read_file`——想让它建个文件，手上却没有 `write_file`。这一章就给 `tools.ts` 补上另外五个（写、编辑、列、搜、Shell）。相对第 1 章，本章加的就是这些：
+
+<!-- @diff file=tools.ts step=2 lang=ts -->
+```diff
+@@ -17,4 +17,62 @@ export const toolDefinitions: Anthropic.Tool[] = [
+     },
+   },
++  {
++    name: "write_file",
++    description: "Write content to a file. Creates it if missing, overwrites if it exists.",
++    input_schema: {
++      type: "object",
++      properties: {
++        file_path: { type: "string", description: "The path to the file to write" },
++        content: { type: "string", description: "The content to write" },
++      },
++      required: ["file_path", "content"],
++    },
++  },
++  {
++    name: "edit_file",
++    description: "Replace an exact string in a file with new content. old_string must match exactly and be unique.",
++    input_schema: {
++      type: "object",
++      properties: {
++        file_path: { type: "string", description: "The path to the file to edit" },
++        old_string: { type: "string", description: "The exact string to find" },
++        new_string: { type: "string", description: "The string to replace it with" },
++      },
++      required: ["file_path", "old_string", "new_string"],
++    },
++  },
++  {
++    name: "list_files",
++    description: "List files matching a glob pattern (e.g. \"**/*.ts\").",
++    input_schema: {
++      type: "object",
++      properties: {
++        pattern: { type: "string", description: "Glob pattern to match files" },
++        path: { type: "string", description: "Base directory. Defaults to cwd." },
++      },
++      required: ["pattern"],
++    },
++  },
++  {
++    name: "grep_search",
++    description: "Search for a regex pattern in files. Returns matching lines with paths and line numbers.",
++    input_schema: {
++      type: "object",
++      properties: {
++        pattern: { type: "string", description: "The regex pattern to search for" },
++        path: { type: "string", description: "Directory or file to search. Defaults to cwd." },
++      },
++      required: ["pattern"],
++    },
++  },
++  {
++    name: "run_shell",
++    description: "Execute a shell command and return its output. For tests, git, package installs, etc.",
++    input_schema: {
++      type: "object",
++      properties: { command: { type: "string", description: "The shell command to execute" } },
++      required: ["command"],
++    },
++  },
+ ];
+ 
+@@ -25,4 +83,9 @@ export async function executeTool(name: string, input: Record<string, any>): Pro
+   switch (name) {
+     case "read_file": return readFile(input as { file_path: string });
++    case "write_file": return writeFile(input as { file_path: string; content: string });
++    case "edit_file": return editFile(input as { file_path: string; old_string: string; new_string: string });
++    case "list_files": return listFiles(input as { pattern: string; path?: string });
++    case "grep_search": return grepSearch(input as { pattern: string; path?: string });
++    case "run_shell": return runShell(input as { command: string });
+     default: return `Unknown tool: ${name}`;
+   }
+@@ -41,2 +104,97 @@ function readFile(input: { file_path: string }): string {
+ 
++function writeFile(input: { file_path: string; content: string }): string {
++  try {
++    const dir = dirname(input.file_path);
++    if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
++    writeFileSync(input.file_path, input.content);
++    const n = input.content.split("\n").length;
++    return `Successfully wrote to ${input.file_path} (${n} lines)`;
++  } catch (e: any) {
++    return `Error writing file: ${e.message}`;
++  }
++}
++
++// edit_file is the one tool with a real trap: the match must be unique, or you
++// edit the wrong place. So we count occurrences and refuse if it isn't unique.
++function editFile(input: { file_path: string; old_string: string; new_string: string }): string {
++  try {
++    const content = readFileSync(input.file_path, "utf-8");
++    if (!content.includes(input.old_string)) {
++      return `Error: old_string not found in ${input.file_path}`;
++    }
++    const count = content.split(input.old_string).length - 1;
++    if (count > 1) {
++      return `Error: old_string found ${count} times in ${input.file_path}. Must be unique.`;
++    }
++    // split/join avoids $-substitution surprises from String.replace.
++    const updated = content.split(input.old_string).join(input.new_string);
++    writeFileSync(input.file_path, updated);
++    return `Successfully edited ${input.file_path}`;
++  } catch (e: any) {
++    return `Error editing file: ${e.message}`;
++  }
++}
++
++async function listFiles(input: { pattern: string; path?: string }): Promise<string> {
++  try {
++    const files = await glob(input.pattern, {
++      cwd: input.path || process.cwd(),
++      nodir: true,
++      ignore: ["node_modules/**", ".git/**"],
++    });
++    if (files.length === 0) return "No files found matching the pattern.";
++    return files.slice(0, 200).join("\n");
++  } catch (e: any) {
++    return `Error listing files: ${e.message}`;
++  }
++}
++
++function grepSearch(input: { pattern: string; path?: string }): string {
++  // Prefer the system grep; fall back to a tiny JS walker if it isn't there.
++  try {
++    const out = execFileSync("grep", ["--line-number", "--color=never", "-r", "--", input.pattern, input.path || "."], {
++      encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 10000,
++    });
++    return out.split("\n").filter(Boolean).slice(0, 100).join("\n") || "No matches found.";
++  } catch (e: any) {
++    if (e.status === 1) return "No matches found.";
++    return grepJS(input.pattern, input.path || ".");
++  }
++}
++
++function grepJS(pattern: string, dir: string): string {
++  let re: RegExp;
++  try { re = new RegExp(pattern); } catch (e: any) { return `Error: invalid regex: ${e.message}`; }
++  const matches: string[] = [];
++  const walk = (d: string) => {
++    let entries: string[];
++    try { entries = readdirSync(d); } catch { return; }
++    for (const name of entries) {
++      if (name.startsWith(".") || name === "node_modules") continue;
++      const full = join(d, name);
++      let st; try { st = statSync(full); } catch { continue; }
++      if (st.isDirectory()) { walk(full); continue; }
++      try {
++        readFileSync(full, "utf-8").split("\n").forEach((line, i) => {
++          if (re.test(line) && matches.length < 100) matches.push(`${full}:${i + 1}:${line}`);
++        });
++      } catch {}
++    }
++  };
++  walk(dir);
++  return matches.length ? matches.join("\n") : "No matches found.";
++}
++
++function runShell(input: { command: string }): string {
++  try {
++    return execSync(input.command, {
++      encoding: "utf-8", maxBuffer: 5 * 1024 * 1024, timeout: 30000,
++      stdio: ["pipe", "pipe", "pipe"], shell: "/bin/sh",
++    }) || "(no output)";
++  } catch (e: any) {
++    return `Command failed (exit ${e.status})${e.stdout ? `\nStdout: ${e.stdout}` : ""}${e.stderr ? `\nStderr: ${e.stderr}` : ""}`;
++  }
++}
+```
+<!-- @enddiff -->
+
+补上之后，同一个「建个文件」的请求走得通了：
+
+<!-- @transcript step=2 lang=ts -->
+```
+$ node steps/run.mjs 2
+▶ step 2 demo (no API key — local mock model)   sandbox: <sandbox>
+  you: Create a file notes.txt containing the text remember-this.
+
+I'll create the file.
+  → write_file({"file_path":"notes.txt","content":"remember-this"})
+Created notes.txt.
+
+  ✓ verified: notes.txt contains "remember-this"
+```
+<!-- @endtranscript -->
 
 ### 工具定义：静态数组
 
@@ -196,55 +389,47 @@ def _read_file(inp: dict) -> str:
 
 <!-- tabs:start -->
 #### **TypeScript**
+<!-- @snippet lang=ts file=tools.ts region=edit_file step=2 -->
 ```typescript
-function editFile(input: {
-  file_path: string;
-  old_string: string;
-  new_string: string;
-}): string {
+function editFile(input: { file_path: string; old_string: string; new_string: string }): string {
   try {
     const content = readFileSync(input.file_path, "utf-8");
-
-    // 唯一匹配检查
-    const count = content.split(input.old_string).length - 1;
-    if (count === 0)
+    if (!content.includes(input.old_string)) {
       return `Error: old_string not found in ${input.file_path}`;
-    if (count > 1)
-      return `Error: old_string found ${count} times. Must be unique.`;
-
-    const newContent = content.replace(input.old_string, input.new_string);
-    writeFileSync(input.file_path, newContent);
+    }
+    const count = content.split(input.old_string).length - 1;
+    if (count > 1) {
+      return `Error: old_string found ${count} times in ${input.file_path}. Must be unique.`;
+    }
+    // split/join avoids $-substitution surprises from String.replace.
+    const updated = content.split(input.old_string).join(input.new_string);
+    writeFileSync(input.file_path, updated);
     return `Successfully edited ${input.file_path}`;
   } catch (e: any) {
     return `Error editing file: ${e.message}`;
   }
 }
 ```
+<!-- @endsnippet -->
 #### **Python**
+<!-- @snippet lang=py file=tools.py region=edit_file step=2 -->
 ```python
 def _edit_file(inp: dict) -> str:
     try:
-        path = Path(inp["file_path"])
-        content = path.read_text()
-
-        # 引号容错匹配
-        actual = _find_actual_string(content, inp["old_string"])
-        if not actual:
+        content = open(inp["file_path"], encoding="utf-8").read()
+        if inp["old_string"] not in content:
             return f"Error: old_string not found in {inp['file_path']}"
-
-        count = content.count(actual)
+        count = content.count(inp["old_string"])
         if count > 1:
             return f"Error: old_string found {count} times in {inp['file_path']}. Must be unique."
-
-        new_content = content.replace(actual, inp["new_string"], 1)
-        path.write_text(new_content)
-
-        diff = _generate_diff(content, actual, inp["new_string"])
-        quote_note = " (matched via quote normalization)" if actual != inp["old_string"] else ""
-        return f"Successfully edited {inp['file_path']}{quote_note}\n\n{diff}"
+        updated = content.replace(inp["old_string"], inp["new_string"])
+        with open(inp["file_path"], "w", encoding="utf-8") as f:
+            f.write(updated)
+        return f"Successfully edited {inp['file_path']}"
     except Exception as e:
         return f"Error editing file: {e}"
 ```
+<!-- @endsnippet -->
 <!-- tabs:end -->
 
 唯一匹配检查是核心：出现 0 次说明模型对文件内容记忆有误（幻觉检测），出现 > 1 次则要求模型提供更多上下文来唯一标识修改点。"宁可失败也不猜测"——静默替换第一个匹配远比告知失败危险。

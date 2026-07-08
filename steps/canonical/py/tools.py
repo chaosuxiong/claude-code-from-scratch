@@ -125,6 +125,7 @@ def _write_file(inp: dict) -> str:
 
 # edit_file is the one tool with a real trap: the match must be unique, or you
 # edit the wrong place. So we count occurrences and refuse if it isn't unique.
+#region edit_file
 def _edit_file(inp: dict) -> str:
     try:
         content = open(inp["file_path"], encoding="utf-8").read()
@@ -139,6 +140,7 @@ def _edit_file(inp: dict) -> str:
         return f"Successfully edited {inp['file_path']}"
     except Exception as e:
         return f"Error editing file: {e}"
+#endregion
 
 
 def _list_files(inp: dict) -> str:

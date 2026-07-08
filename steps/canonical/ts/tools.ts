@@ -122,6 +122,7 @@ function writeFile(input: { file_path: string; content: string }): string {
 
 // edit_file is the one tool with a real trap: the match must be unique, or you
 // edit the wrong place. So we count occurrences and refuse if it isn't unique.
+//#region edit_file
 function editFile(input: { file_path: string; old_string: string; new_string: string }): string {
   try {
     const content = readFileSync(input.file_path, "utf-8");
@@ -140,6 +141,7 @@ function editFile(input: { file_path: string; old_string: string; new_string: st
     return `Error editing file: ${e.message}`;
   }
 }
+//#endregion
 
 async function listFiles(input: { pattern: string; path?: string }): Promise<string> {
   try {
