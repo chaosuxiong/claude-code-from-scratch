@@ -30,6 +30,7 @@ const STEP_INFO = {
   4: "CLI & sessions — arg parsing, /clear, save & --resume a conversation",
   5: "streaming — the model call becomes a stream; text appears as it is generated",
   6: "permissions — a gate checks each tool call; dangerous shell commands are blocked",
+  7: "context — when the history grows too long, older messages are summarized (compacted)",
 };
 
 const args = process.argv.slice(2);

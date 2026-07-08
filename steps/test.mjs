@@ -108,8 +108,10 @@ export async function checkStep(n) {
     norms[lang] = normalize(log);
 
     if (log.some((e) => e.type === "exhausted")) tag(lang, "mock scenario exhausted (agent made an unexpected extra call)");
-    // every scripted turn consumed = one request per turn
-    if (requests.length !== scenario.turns.length) tag(lang, `made ${requests.length} model calls, expected ${scenario.turns.length} (final turn not reached?)`);
+    // every scripted turn consumed = one request per turn (across all tracks)
+    const totalTurns = scenario.turns ? scenario.turns.length
+      : Object.values(scenario.tracks || {}).reduce((s, t) => s + (t.turns?.length || 0), 0);
+    if (requests.length !== totalTurns) tag(lang, `made ${requests.length} model calls, expected ${totalTurns} (final turn not reached?)`);
     // reached the final turn
     const last = responses[responses.length - 1];
     if (expect.finalStopReason && (!last || last.stop_reason !== expect.finalStopReason)) tag(lang, `final stop_reason ${last?.stop_reason} != ${expect.finalStopReason}`);
@@ -121,6 +123,8 @@ export async function checkStep(n) {
     for (const sub of expect.toolResultsContain || []) if (!allResults.includes(sub)) tag(lang, `no tool_result contained ${JSON.stringify(sub)} (tool didn't really run / wrong output)`);
     // the system prompt carries what this chapter added
     if (expect.systemContains && !requests.some((e) => (e.system || "").includes(expect.systemContains))) tag(lang, `system prompt missing ${JSON.stringify(expect.systemContains)}`);
+    // aux tracks (ch7 compaction, ch15 goal/classifier): the side call really happened
+    for (const t of expect.tracksUsed || []) if (!requests.some((e) => e.track === t)) tag(lang, `no request on track "${t}" (the ${t} aux call didn't happen)`);
     if (expect.stdoutContains && !stdout.includes(expect.stdoutContains)) tag(lang, `stdout missing ${JSON.stringify(expect.stdoutContains)}`);
     // file side effects
     for (const [name, content] of Object.entries(expect.files || {})) {

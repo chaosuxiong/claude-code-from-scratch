@@ -32,7 +32,110 @@ graph TD
     style Summary fill:#7c5cfc,color:#fff
 ```
 
+> ▶ **跑这一章**：`node steps/run.mjs 7`（无需 API key）——看它在对话变长时把旧消息压成摘要。加 `--diff` 看它比上一章多了什么。
+
 ## 我们的实现
+
+第 1 章说过，消息数组每一轮都在变长。跑久了它迟早撑爆模型的上下文窗口。这一章加压缩：消息一多，就用一次额外的模型调用把旧消息总结成一段摘要，替换掉原文，只留最近几条。相对上一章，新增了一个 `context.ts`，agent 每次调模型前先过一遍压缩：
+
+<!-- @diff file=agent.ts step=7 lang=ts -->
+```diff
+@@ -3,4 +3,5 @@ import { toolDefinitions, executeTool } from "./tools.js";
+ import { buildSystemPrompt } from "./prompt.js";
+ import { checkPermission } from "./permissions.js";
++import { maybeCompact } from "./context.js";
+ 
+ const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
+@@ -27,4 +28,6 @@ export class Agent {
+ 
+     while (true) {
++      // Before each model call, compact the history if it has grown too long.
++      this.messages = await maybeCompact(this.messages, this.client, MODEL);
+       // Build the request once. Passing `tools` is the one line that makes the
+       // model tool-aware. Chapter 5 turns the call itself into a stream.
+```
+<!-- @enddiff -->
+
+压缩本身就是「超过阈值就摘要旧消息」：
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=context.ts region=compact step=7 -->
+```typescript
+export async function maybeCompact(
+  messages: Anthropic.MessageParam[],
+  client: Anthropic,
+  model: string,
+): Promise<Anthropic.MessageParam[]> {
+  if (messages.length <= COMPACT_THRESHOLD) return messages;
+
+  const older = messages.slice(0, messages.length - KEEP_RECENT);
+  const recent = messages.slice(messages.length - KEEP_RECENT);
+
+  // One aux model call: summarize the older messages (rendered as plain text so
+  // we never split a tool_use / tool_result pair).
+  const transcript = older
+    .map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[tool call / result]"}`)
+    .join("\n");
+  const reply = await client.messages.create({
+    model, max_tokens: 1024,
+    system: "Summarize the conversation so far in a few sentences, keeping key facts.",
+    messages: [{ role: "user", content: transcript }],
+  });
+  const summary = reply.content.filter((b) => b.type === "text").map((b: any) => b.text).join("");
+
+  console.log(`  (compacted ${older.length} messages into a summary)`);
+  return [{ role: "user", content: `[Summary of earlier conversation]\n${summary}` }, ...recent];
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=context.py region=compact step=7 -->
+```python
+def maybe_compact(messages, client, model):
+    if len(messages) <= COMPACT_THRESHOLD:
+        return messages
+
+    older = messages[: len(messages) - KEEP_RECENT]
+    recent = messages[len(messages) - KEEP_RECENT :]
+
+    # One aux model call: summarize the older messages (rendered as plain text so
+    # we never split a tool_use / tool_result pair).
+    transcript = "\n".join(
+        f"{m['role']}: {m['content'] if isinstance(m.get('content'), str) else '[tool call / result]'}"
+        for m in older
+    )
+    reply = client.messages.create(
+        model=model, max_tokens=1024,
+        system="Summarize the conversation so far in a few sentences, keeping key facts.",
+        messages=[{"role": "user", "content": transcript}],
+    )
+    summary = "".join(b.text for b in reply.content if b.type == "text")
+
+    print(f"  (compacted {len(older)} messages into a summary)")
+    return [{"role": "user", "content": f"[Summary of earlier conversation]\n{summary}"}, *recent]
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+跑一下，读几个文件把历史撑长，压缩就触发了（看那行 `compacted ... into a summary`）：
+
+<!-- @transcript step=7 lang=ts -->
+```
+$ node steps/run.mjs 7
+▶ step 7 demo (no API key — local mock model)   sandbox: <sandbox>
+  you: Read a.txt, then b.txt, then c.txt, then summarize.
+
+
+  → read_file({"file_path":"a.txt"})
+
+  → read_file({"file_path":"b.txt"})
+
+  → read_file({"file_path":"c.txt"})
+  (compacted 5 messages into a summary)
+All three read: alpha, beta, gamma.
+```
+<!-- @endtranscript -->
 
 分层来做：执行时截断（Tier 0）打底兜住单次超大输出，上面叠 4 个压缩 tier——Budget、Snip、Microcompact、Auto-compact——从轻到重，前三个每次 API 调用前顺序跑，最重的 Auto-compact 在 turn 边界触发。
 

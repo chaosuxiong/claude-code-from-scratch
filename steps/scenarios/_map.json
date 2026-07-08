@@ -71,5 +71,23 @@
       ],
       "finalStopReason": "end_turn"
     }
+  },
+  "7": {
+    "scenario": "long-conversation",
+    "expect": {
+      "toolCalls": [
+        "read_file",
+        "read_file",
+        "read_file"
+      ],
+      "toolResultsContain": [
+        "alpha",
+        "gamma"
+      ],
+      "tracksUsed": [
+        "compact"
+      ],
+      "finalStopReason": "end_turn"
+    }
   }
 }

@@ -6,6 +6,9 @@ import { buildSystemPrompt } from "./prompt.js";
 //#step >=6
 import { checkPermission } from "./permissions.js";
 //#endstep
+//#step >=7
+import { maybeCompact } from "./context.js";
+//#endstep
 
 const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
 
@@ -37,6 +40,10 @@ export class Agent {
     this.messages.push({ role: "user", content: userText });
 
     while (true) {
+//#step >=7
+      // Before each model call, compact the history if it has grown too long.
+      this.messages = await maybeCompact(this.messages, this.client, MODEL);
+//#endstep
       // Build the request once. Passing `tools` is the one line that makes the
       // model tool-aware. Chapter 5 turns the call itself into a stream.
       const request = {

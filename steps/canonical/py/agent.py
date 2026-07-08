@@ -10,6 +10,9 @@ from prompt import build_system_prompt
 #step >=6
 from permissions import check_permission
 #endstep
+#step >=7
+from context import maybe_compact
+#endstep
 
 MODEL = os.environ.get("MINI_MODEL", "claude-sonnet-4-5-20250929")
 
@@ -42,6 +45,10 @@ class Agent:
         self.messages.append({"role": "user", "content": user_text})
 
         while True:
+#step >=7
+            # Before each model call, compact the history if it has grown too long.
+            self.messages = maybe_compact(self.messages, self.client, MODEL)
+#endstep
             kwargs = dict(model=MODEL, max_tokens=4096, tools=tool_definitions, messages=self.messages)
 #step >=3
             kwargs["system"] = build_system_prompt()

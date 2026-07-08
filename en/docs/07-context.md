@@ -32,7 +32,110 @@ graph TD
     style Summary fill:#7c5cfc,color:#fff
 ```
 
+> ▶ **Run this chapter**: `node steps/run.mjs 7` (no API key) — watch it summarize older messages once the conversation grows. Add `--diff` to see what it added over the previous chapter.
+
 ## Our Implementation
+
+Chapter 1 noted that the message array grows every turn. Run long enough and it overflows the model's context window. This chapter adds compaction: when the history gets long, one extra model call summarizes the older messages into a paragraph, replacing them and keeping only the recent few. Relative to last chapter, it adds a `context.ts`, and the agent compacts before each model call:
+
+<!-- @diff file=agent.ts step=7 lang=ts -->
+```diff
+@@ -3,4 +3,5 @@ import { toolDefinitions, executeTool } from "./tools.js";
+ import { buildSystemPrompt } from "./prompt.js";
+ import { checkPermission } from "./permissions.js";
++import { maybeCompact } from "./context.js";
+ 
+ const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
+@@ -27,4 +28,6 @@ export class Agent {
+ 
+     while (true) {
++      // Before each model call, compact the history if it has grown too long.
++      this.messages = await maybeCompact(this.messages, this.client, MODEL);
+       // Build the request once. Passing `tools` is the one line that makes the
+       // model tool-aware. Chapter 5 turns the call itself into a stream.
+```
+<!-- @enddiff -->
+
+Compaction itself is just "summarize the older messages once past a threshold":
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=context.ts region=compact step=7 -->
+```typescript
+export async function maybeCompact(
+  messages: Anthropic.MessageParam[],
+  client: Anthropic,
+  model: string,
+): Promise<Anthropic.MessageParam[]> {
+  if (messages.length <= COMPACT_THRESHOLD) return messages;
+
+  const older = messages.slice(0, messages.length - KEEP_RECENT);
+  const recent = messages.slice(messages.length - KEEP_RECENT);
+
+  // One aux model call: summarize the older messages (rendered as plain text so
+  // we never split a tool_use / tool_result pair).
+  const transcript = older
+    .map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[tool call / result]"}`)
+    .join("\n");
+  const reply = await client.messages.create({
+    model, max_tokens: 1024,
+    system: "Summarize the conversation so far in a few sentences, keeping key facts.",
+    messages: [{ role: "user", content: transcript }],
+  });
+  const summary = reply.content.filter((b) => b.type === "text").map((b: any) => b.text).join("");
+
+  console.log(`  (compacted ${older.length} messages into a summary)`);
+  return [{ role: "user", content: `[Summary of earlier conversation]\n${summary}` }, ...recent];
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=context.py region=compact step=7 -->
+```python
+def maybe_compact(messages, client, model):
+    if len(messages) <= COMPACT_THRESHOLD:
+        return messages
+
+    older = messages[: len(messages) - KEEP_RECENT]
+    recent = messages[len(messages) - KEEP_RECENT :]
+
+    # One aux model call: summarize the older messages (rendered as plain text so
+    # we never split a tool_use / tool_result pair).
+    transcript = "\n".join(
+        f"{m['role']}: {m['content'] if isinstance(m.get('content'), str) else '[tool call / result]'}"
+        for m in older
+    )
+    reply = client.messages.create(
+        model=model, max_tokens=1024,
+        system="Summarize the conversation so far in a few sentences, keeping key facts.",
+        messages=[{"role": "user", "content": transcript}],
+    )
+    summary = "".join(b.text for b in reply.content if b.type == "text")
+
+    print(f"  (compacted {len(older)} messages into a summary)")
+    return [{"role": "user", "content": f"[Summary of earlier conversation]\n{summary}"}, *recent]
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+Run it: reading a few files grows the history until compaction fires (see the `compacted ... into a summary` line):
+
+<!-- @transcript step=7 lang=ts -->
+```
+$ node steps/run.mjs 7
+▶ step 7 demo (no API key — local mock model)   sandbox: <sandbox>
+  you: Read a.txt, then b.txt, then c.txt, then summarize.
+
+
+  → read_file({"file_path":"a.txt"})
+
+  → read_file({"file_path":"b.txt"})
+
+  → read_file({"file_path":"c.txt"})
+  (compacted 5 messages into a summary)
+All three read: alpha, beta, gamma.
+```
+<!-- @endtranscript -->
 
 Built in layers: execution-time truncation (Tier 0) as the floor catching a single oversized output, with 4 compression tiers on top — Budget, Snip, Microcompact, Auto-compact — from lightest to heaviest; the first three run in order before each API call, and the heaviest, Auto-compact, fires at the turn boundary.
 
