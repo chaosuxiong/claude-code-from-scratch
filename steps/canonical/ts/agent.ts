@@ -15,6 +15,9 @@ import { recallMemories } from "./memory.js";
 //#step >=11
 import { runSubAgent } from "./subagent.js";
 //#endstep
+//#step >=12
+import { connectMcp, type McpConnection } from "./mcp.js";
+//#endstep
 
 const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
 
@@ -47,6 +50,9 @@ export class Agent {
 //#region loop
   async chat(userText: string): Promise<void> {
     this.messages.push({ role: "user", content: userText });
+//#step >=12
+    await this.ensureMcp(); // discover external MCP tools before the loop
+//#endstep
 
     while (true) {
 //#step >=7
@@ -62,13 +68,22 @@ export class Agent {
       // Recall memories relevant to what the user just asked, into the prompt.
       system += recallMemories(userText);
 //#endstep
+//#step >=12
+      // Merge in any external MCP tools, prefixed so we can route their calls back.
+      const mcpTools: Anthropic.Tool[] = (this.mcp?.tools || []).map((t) => ({ name: `mcp__demo__${t.name}`, description: t.description, input_schema: t.input_schema as any }));
+      const tools = [...toolDefinitions, ...mcpTools];
+//#endstep
       // Build the request once. Passing `tools` is the one line that makes the
       // model tool-aware. Chapter 5 turns the call itself into a stream.
       const request = {
         model: MODEL,
         max_tokens: 4096,
         system,
+//#step >=12
+        tools,
+//#step <=11
         tools: toolDefinitions,
+//#endstep
         messages: this.messages,
       };
 
@@ -108,6 +123,15 @@ export class Agent {
           continue;
         }
 //#endstep
+//#step >=12
+        // MCP tools (mcp__server__tool) are routed to the MCP server, not run locally.
+        if (tu.name.startsWith("mcp__")) {
+          const toolName = tu.name.replace(/^mcp__[^_]+__/, "");
+          const output = this.mcp ? await this.mcp.callTool(toolName, tu.input) : "Denied: no MCP server connected.";
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: output });
+          continue;
+        }
+//#endstep
 //#step >=10
         // Plan mode is read-only: writes and shell are denied on top of the gate.
         const blocked = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
@@ -137,5 +161,13 @@ export class Agent {
 //#endstep
 //#step >=10
   setMode(m: string): void { this.mode = m; }
+//#endstep
+//#step >=12
+  private mcp: McpConnection | null = null;
+  // Connect to the MCP server named in MINI_MCP_SERVER once, on first use.
+  private async ensureMcp(): Promise<void> {
+    if (this.mcp || !process.env.MINI_MCP_SERVER) return;
+    this.mcp = await connectMcp("node", [process.env.MINI_MCP_SERVER]);
+  }
 //#endstep
 }

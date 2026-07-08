@@ -23,6 +23,8 @@ graph TB
     style Agent fill:#e8e0ff
 ```
 
+> ▶ **跑这一章**：`node steps/run.mjs 12`（无需 API key）——看模型调一个来自外部 MCP 服务器的 `add` 工具。加 `--diff` 看它比上一章多了什么。
+
 核心思路：**spawn 子进程 → JSON-RPC 握手 → 发现工具 → 前缀注册 → 透明路由**。对 Agent Loop 来说，MCP 工具和内置工具没有区别——都是名字 + schema + 执行函数。
 
 ## 配置格式
@@ -52,6 +54,166 @@ graph TB
 也可以使用项目根目录的 `.mcp.json`，格式相同。三处配置的服务器合并后一起连接，同名服务器后读覆盖先读。
 
 ## 我们的实现
+
+到现在，agent 的工具全写死在 `tools.ts` 里——想加个新工具就得改源码。这一章接上 MCP：一个让 agent 动态挂载外部工具的协议。声明一个服务器，就能把它的工具接进来，不动一行 agent 逻辑。相对上一章，新增了一个 `mcp.ts`，agent 启动时连上服务器、把发现的工具（带 `mcp__` 前缀）并进工具表，调用时再路由回去：
+
+<!-- @diff file=agent.ts step=12 lang=ts -->
+```diff
+@@ -6,4 +6,5 @@ import { maybeCompact } from "./context.js";
+ import { recallMemories } from "./memory.js";
+ import { runSubAgent } from "./subagent.js";
++import { connectMcp, type McpConnection } from "./mcp.js";
+ 
+ const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
+@@ -29,4 +30,5 @@ export class Agent {
+   async chat(userText: string): Promise<void> {
+     this.messages.push({ role: "user", content: userText });
++    await this.ensureMcp(); // discover external MCP tools before the loop
+ 
+     while (true) {
+@@ -36,4 +38,7 @@ export class Agent {
+       // Recall memories relevant to what the user just asked, into the prompt.
+       system += recallMemories(userText);
++      // Merge in any external MCP tools, prefixed so we can route their calls back.
++      const mcpTools: Anthropic.Tool[] = (this.mcp?.tools || []).map((t) => ({ name: `mcp__demo__${t.name}`, description: t.description, input_schema: t.input_schema as any }));
++      const tools = [...toolDefinitions, ...mcpTools];
+       // Build the request once. Passing `tools` is the one line that makes the
+       // model tool-aware. Chapter 5 turns the call itself into a stream.
+@@ -42,5 +47,5 @@ export class Agent {
+         max_tokens: 4096,
+         system,
+-        tools: toolDefinitions,
++        tools,
+         messages: this.messages,
+       };
+@@ -72,4 +77,11 @@ export class Agent {
+           continue;
+         }
++        // MCP tools (mcp__server__tool) are routed to the MCP server, not run locally.
++        if (tu.name.startsWith("mcp__")) {
++          const toolName = tu.name.replace(/^mcp__[^_]+__/, "");
++          const output = this.mcp ? await this.mcp.callTool(toolName, tu.input) : "Denied: no MCP server connected.";
++          results.push({ type: "tool_result", tool_use_id: tu.id, content: output });
++          continue;
++        }
+         // Plan mode is read-only: writes and shell are denied on top of the gate.
+         const blocked = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
+@@ -89,3 +101,9 @@ export class Agent {
+   clearHistory(): void { this.messages = []; }
+   setMode(m: string): void { this.mode = m; }
++  private mcp: McpConnection | null = null;
++  // Connect to the MCP server named in MINI_MCP_SERVER once, on first use.
++  private async ensureMcp(): Promise<void> {
++    if (this.mcp || !process.env.MINI_MCP_SERVER) return;
++    this.mcp = await connectMcp("node", [process.env.MINI_MCP_SERVER]);
++  }
+ }
+```
+<!-- @enddiff -->
+
+MCP 客户端就是「spawn 服务器子进程，用 stdio 上的 JSON-RPC 握手、发现工具、调用工具」——这正是 MCP 的精髓（真实 MCP 还有多种传输和鉴权，这里只留 stdio）：
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=mcp.ts region=mcp step=12 -->
+```typescript
+export async function connectMcp(command: string, args: string[]): Promise<McpConnection> {
+  const proc = spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
+  const rl = createInterface({ input: proc.stdout! });
+  let nextId = 1;
+  const pending = new Map<number, (v: any) => void>();
+  rl.on("line", (line) => {
+    try { const msg = JSON.parse(line); if (msg.id && pending.has(msg.id)) { pending.get(msg.id)!(msg); pending.delete(msg.id); } } catch {}
+  });
+  const request = (method: string, params?: unknown) =>
+    new Promise<any>((resolve) => {
+      const id = nextId++;
+      pending.set(id, resolve);
+      proc.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    });
+
+  await request("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "mini-claude", version: "1.0" } });
+  proc.stdin!.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+  const listed = await request("tools/list");
+  const tools: McpTool[] = (listed.result?.tools || []).map((t: any) => ({ name: t.name, description: t.description || "", input_schema: t.inputSchema }));
+
+  return {
+    tools,
+    async callTool(name, args) {
+      const r = await request("tools/call", { name, arguments: args });
+      const content = r.result?.content || [];
+      return content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("") || JSON.stringify(r.result ?? r.error);
+    },
+    close() { proc.kill(); },
+  };
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=mcp_client.py region=mcp step=12 -->
+```python
+class McpConnection:
+    def __init__(self, command, args):
+        self.proc = subprocess.Popen([command, *args], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, text=True, bufsize=1)
+        self._id = 0
+        self._lock = threading.Lock()
+
+    def _request(self, method, params=None):
+        with self._lock:
+            self._id += 1
+            rid = self._id
+            self.proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}}) + "\n")
+            self.proc.stdin.flush()
+            while True:
+                line = self.proc.stdout.readline()
+                if not line:
+                    return {}
+                msg = json.loads(line)
+                if msg.get("id") == rid:
+                    return msg
+
+    def _notify(self, method):
+        self.proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method}) + "\n")
+        self.proc.stdin.flush()
+
+    def connect(self):
+        self._request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "mini-claude", "version": "1.0"}})
+        self._notify("notifications/initialized")
+        listed = self._request("tools/list")
+        self.tools = [{"name": t["name"], "description": t.get("description", ""), "input_schema": t.get("inputSchema")}
+                      for t in listed.get("result", {}).get("tools", [])]
+        return self
+
+    def call_tool(self, name, args):
+        r = self._request("tools/call", {"name": name, "arguments": args})
+        content = r.get("result", {}).get("content", [])
+        text = "".join(c.get("text", "") for c in content if c.get("type") == "text")
+        return text or json.dumps(r.get("result") or r.get("error"))
+
+    def close(self):
+        self.proc.terminate()
+
+
+def connect_mcp(command, args):
+    return McpConnection(command, args).connect()
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+跑一下，接上一个提供 `add` 工具的示例 MCP 服务器，模型调 `mcp__demo__add(17, 25)`，服务器算出 42：
+
+<!-- @transcript step=12 lang=ts -->
+```
+$ node steps/run.mjs 12
+▶ step 12 demo (no API key — local mock model)   sandbox: <sandbox>
+  you: Use the add tool to compute 17 + 25.
+
+
+  → mcp__demo__add({"a":17,"b":25})
+17 + 25 = 42.
+```
+<!-- @endtranscript -->
 
 用 **~277 行** 的 `mcp.ts` 实现完整的 MCP 客户端，无任何 SDK 依赖。
 

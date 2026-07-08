@@ -133,5 +133,17 @@
       ],
       "finalStopReason": "end_turn"
     }
+  },
+  "12": {
+    "scenario": "use-mcp-tool",
+    "expect": {
+      "toolCalls": [
+        "mcp__demo__add"
+      ],
+      "toolResultsContain": [
+        "42"
+      ],
+      "finalStopReason": "end_turn"
+    }
   }
 }

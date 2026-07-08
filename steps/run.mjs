@@ -22,6 +22,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = dirname(HERE);
 const DIST = join(HERE, "dist");
 const SCEN = join(HERE, "scenarios");
+// ch12: point the MCP client at the bundled demo server (inherited by child procs).
+if (!process.env.MINI_MCP_SERVER) process.env.MINI_MCP_SERVER = join(HERE, "mcp-demo-server.mjs");
 
 const STEP_INFO = {
   1: "agent loop — talk to the model and call one tool (read_file)",
@@ -35,6 +37,7 @@ const STEP_INFO = {
   9: "skills — /name runs a reusable prompt template loaded from a file",
   10: "plan mode — --plan makes the agent read-only; writes and shell are denied",
   11: "multi-agent — the agent tool forks a read-only sub-agent to investigate",
+  12: "MCP — connect an external stdio JSON-RPC tool server and call its tools",
 };
 
 const args = process.argv.slice(2);

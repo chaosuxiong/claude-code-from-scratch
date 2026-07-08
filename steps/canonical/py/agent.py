@@ -19,6 +19,9 @@ from memory import recall_memories
 #step >=11
 from subagent import run_sub_agent
 #endstep
+#step >=12
+from mcp_client import connect_mcp
+#endstep
 
 MODEL = os.environ.get("MINI_MODEL", "claude-sonnet-4-5-20250929")
 
@@ -46,12 +49,18 @@ class Agent:
 #step >=10
         self.mode = "default"  # "plan" makes the agent read-only
 #endstep
+#step >=12
+        self.mcp = None
+#endstep
 
     # One user turn. Call the model; if it asks for tools, run them and feed the
     # results back; repeat until it answers with plain text.
 #region loop
     def chat(self, user_text: str) -> None:
         self.messages.append({"role": "user", "content": user_text})
+#step >=12
+        self._ensure_mcp()  # discover external MCP tools before the loop
+#endstep
 
         while True:
 #step >=7
@@ -67,7 +76,15 @@ class Agent:
             # Recall memories relevant to what the user just asked, into the prompt.
             system += recall_memories(user_text)
 #endstep
-            kwargs = dict(model=MODEL, max_tokens=4096, system=system, tools=tool_definitions, messages=self.messages)
+#step >=12
+            # Merge in any external MCP tools, prefixed so we can route their calls back.
+            mcp_tools = [{"name": f"mcp__demo__{t['name']}", "description": t["description"], "input_schema": t["input_schema"]}
+                         for t in (self.mcp.tools if self.mcp else [])]
+            tools = tool_definitions + mcp_tools
+#step <=11
+            tools = tool_definitions
+#endstep
+            kwargs = dict(model=MODEL, max_tokens=4096, system=system, tools=tools, messages=self.messages)
 
 #step >=5
             # Stream the reply so text shows up as it is generated, then collect
@@ -104,6 +121,14 @@ class Agent:
                     results.append({"type": "tool_result", "tool_use_id": tu.id, "content": summary})
                     continue
 #endstep
+#step >=12
+                # MCP tools (mcp__server__tool) go to the MCP server, not run locally.
+                if tu.name.startswith("mcp__"):
+                    tool_name = tu.name.split("__", 2)[-1]
+                    output = self.mcp.call_tool(tool_name, tu.input) if self.mcp else "Denied: no MCP server connected."
+                    results.append({"type": "tool_result", "tool_use_id": tu.id, "content": output})
+                    continue
+#endstep
 #step >=10
                 # Plan mode is read-only: writes and shell are denied on top of the gate.
                 blocked = check_permission(tu.name, tu.input) == "deny" or (
@@ -136,4 +161,10 @@ class Agent:
 #step >=10
     def set_mode(self, m: str) -> None:
         self.mode = m
+#endstep
+#step >=12
+    # Connect to the MCP server named in MINI_MCP_SERVER once, on first use.
+    def _ensure_mcp(self):
+        if self.mcp is None and os.environ.get("MINI_MCP_SERVER"):
+            self.mcp = connect_mcp("node", [os.environ["MINI_MCP_SERVER"]])
 #endstep

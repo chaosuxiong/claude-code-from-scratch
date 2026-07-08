@@ -19,6 +19,7 @@ const DIST = join(HERE, "dist");
 const SCEN = join(HERE, "scenarios");
 const TSC = join(REPO, "node_modules", ".bin", "tsc");
 const VENV_PY = join(REPO, ".venv", "bin", "python");
+const MCP_SERVER = join(HERE, "mcp-demo-server.mjs"); // ch12's demo MCP server
 
 function ensureBuilt() { if (!existsSync(DIST)) spawnSync("node", [join(HERE, "build.mjs")], { stdio: "inherit" }); }
 const stepDirs = () => readdirSync(DIST).sort();
@@ -41,9 +42,9 @@ async function runTs(n, scenario, logPath, workdir) {
   if (build.status !== 0) throw new Error(`tsc failed for step ${n}:\n${build.stdout}${build.stderr}`);
   setupFiles(scenario, workdir);
   const mock = await startMock({ scenario, logPath });
-  const prev = { cwd: process.cwd(), base: process.env.ANTHROPIC_BASE_URL, key: process.env.ANTHROPIC_API_KEY, write: process.stdout.write };
+  const prev = { cwd: process.cwd(), base: process.env.ANTHROPIC_BASE_URL, key: process.env.ANTHROPIC_API_KEY, mcp: process.env.MINI_MCP_SERVER, write: process.stdout.write };
   let out = "";
-  process.env.ANTHROPIC_BASE_URL = mock.url; process.env.ANTHROPIC_API_KEY = "test";
+  process.env.ANTHROPIC_BASE_URL = mock.url; process.env.ANTHROPIC_API_KEY = "test"; process.env.MINI_MCP_SERVER = MCP_SERVER;
   process.chdir(workdir);
   process.stdout.write = (s) => { out += s; return true; }; // capture, don't discard
   try {
@@ -56,7 +57,7 @@ async function runTs(n, scenario, logPath, workdir) {
     }
   } finally {
     process.stdout.write = prev.write; process.chdir(prev.cwd);
-    process.env.ANTHROPIC_BASE_URL = prev.base; process.env.ANTHROPIC_API_KEY = prev.key;
+    process.env.ANTHROPIC_BASE_URL = prev.base; process.env.ANTHROPIC_API_KEY = prev.key; process.env.MINI_MCP_SERVER = prev.mcp;
     await mock.close();
   }
   return out;
@@ -64,7 +65,7 @@ async function runTs(n, scenario, logPath, workdir) {
 
 function runPy(n, scenarioPath, logPath, workdir) {
   const pyDir = join(DIST, stepName(n), "py");
-  const env = { ...process.env };
+  const env = { ...process.env, MINI_MCP_SERVER: MCP_SERVER };
   for (const k of ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete env[k];
   const r = spawnSync(VENV_PY, [join(HERE, "_pydriver.py"), pyDir, scenarioPath, logPath, workdir],
     { encoding: "utf-8", env, timeout: 30000 });

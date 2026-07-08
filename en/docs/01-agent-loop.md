@@ -150,7 +150,8 @@ def chat(self, user_text: str) -> None:
 
     while True:
         system = SYSTEM_PROMPT
-        kwargs = dict(model=MODEL, max_tokens=4096, system=system, tools=tool_definitions, messages=self.messages)
+        tools = tool_definitions
+        kwargs = dict(model=MODEL, max_tokens=4096, system=system, tools=tools, messages=self.messages)
 
         reply = self.client.messages.create(**kwargs)
         for block in reply.content:
