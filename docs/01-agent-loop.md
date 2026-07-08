@@ -21,6 +21,8 @@ graph TB
     style D fill:#e8e0ff
 ```
 
+> ▶ **跑这一章**：`node steps/run.mjs 1`（无需 API key，走本地 mock 模型）。加 `--py` 跑 Python 版。
+
 ## 第一版：一个只会聊天的循环
 
 先写出最笨的版本。把用户的话加进消息数组，调一次模型，把回复打印出来——就这些：
@@ -88,154 +90,108 @@ async function chat(messages, userMessage) {
 }
 ```
 
-比第一版多的就两处：请求里多了 `tools: toolDefinitions`（让模型知道有哪些工具），外面套了个 `while`（工具跑完把结果喂回去、再问一轮）。刚才读不了文件的同一个问题，现在走得通了：
-
-```
-> 读一下 src/agent.ts，讲讲主循环
-  ⏺ read_file(src/agent.ts)
-  ⎿ import Anthropic from "@anthropic-ai/sdk"; …（约 2169 行）
-主循环在 chatAnthropic 里：一个 while(true)，每轮调用模型、取出 tool_use、执行工具、把结果作为 user 消息喂回去，直到某轮模型不再调工具就退出。
-```
-
-看清楚这一轮里发生了什么：模型收到问题，回了一个「我要调 read_file(src/agent.ts)」；循环没有停，而是真去读了文件，把内容作为 user 消息塞回消息数组，再调一次模型；模型这次看到了文件内容，才讲出主循环，这一轮它不再要调工具，循环于是退出。
+比第一版多的就两处：请求里多了 `tools: toolDefinitions`（让模型知道有哪些工具），外面套了个 `while`（工具跑完把结果喂回去、再问一轮）。刚才读不了文件的同一个问题，现在走得通了。
 
 **决定循环转不转的，从头到尾是模型，不是我们的代码。** 我们没写任何「如果是读文件请求就……」的分支——是模型自己决定这一步要不要动手、动手之后够不够、要不要再来一轮。这一点就是 agent 和聊天机器人的分界线。
 
-上面为了讲清主干，省掉了权限检查、优雅中断这些。给同一个骨架补上这两样，就是下面两个语言对照的版本——注意它仍然只是本章的骨架，不是仓库里的全部。项目里 `agent.ts` 的 `chatAnthropic()` 在这之上还叠了记忆预取、上下文压缩、预算控制、缓存计费、流式提前执行等等，都是后面几章一层层加进去的（比如压缩在第 7 章、流式提前执行在第 5 章）：
+到这里，可运行的最小版就成型了。下面这段就是 steps 里第 1 章的 `Agent.chat`——你刚才读到的循环，落成两种语言里真能跑的代码（TypeScript 和 Python 一一对应）：
 
 <!-- tabs:start -->
 #### **TypeScript**
+<!-- @snippet lang=ts file=agent.ts region=loop step=1 -->
 ```typescript
-// agent.ts — chatAnthropic 方法（核心 Agent Loop）
-
-private async chatAnthropic(userMessage: string): Promise<void> {
-  this.anthropicMessages.push({ role: "user", content: userMessage });
-  // 在 turn boundary 触发 auto-compact：此时最后一条消息是纯文本 user，
-  // compactAnthropic 内部的 slice(0, -1) 不会切断 tool_use ↔ tool_result 配对（详见第 7 章）
-  await this.checkAndCompact();
+async chat(userText: string): Promise<void> {
+  this.messages.push({ role: "user", content: userText });
 
   while (true) {
-    if (this.abortController?.signal.aborted) break;
+    // Ask the model for its next step. Passing `tools` is the one line that
+    // makes it tool-aware. (Chapter 5 turns this into a streaming call.)
+    const reply = await this.client.messages.create({
+      model: MODEL,
+      max_tokens: 4096,
+      system: SYSTEM_PROMPT,
+      tools: toolDefinitions,
+      messages: this.messages,
+    });
 
-    const response = await this.callAnthropicStream();
-
-    // 累计 token 用量
-    this.totalInputTokens += response.usage.input_tokens;
-    this.totalOutputTokens += response.usage.output_tokens;
-    this.lastInputTokenCount = response.usage.input_tokens;
-
-    // 提取 tool_use block
-    const toolUses: Anthropic.ToolUseBlock[] = [];
-    for (const block of response.content) {
-      if (block.type === "tool_use") toolUses.push(block);
+    // Print the assistant's text.
+    for (const block of reply.content) {
+      if (block.type === "text") process.stdout.write(block.text);
     }
+    process.stdout.write("\n");
 
-    // assistant 响应推入历史
-    this.anthropicMessages.push({ role: "assistant", content: response.content });
+    // Record the assistant's full reply (text + any tool calls).
+    this.messages.push({ role: "assistant", content: reply.content });
 
-    // 没有工具调用 → 任务完成
-    if (toolUses.length === 0) {
-      printCost(this.totalInputTokens, this.totalOutputTokens);
-      break;
+    const toolUses = reply.content.filter(
+      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use"
+    );
+    // No tool calls means the model is done with this turn.
+    if (toolUses.length === 0) return;
+
+    // Run every requested tool and send the outputs back as one user message.
+    const results: Anthropic.ToolResultBlockParam[] = [];
+    for (const tu of toolUses) {
+      console.log(`  → ${tu.name}(${JSON.stringify(tu.input)})`);
+      const output = await executeTool(tu.name, tu.input as Record<string, any>);
+      results.push({ type: "tool_result", tool_use_id: tu.id, content: output });
     }
-
-    // 串行执行每个工具
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const toolUse of toolUses) {
-      if (this.abortController?.signal.aborted) break;
-
-      const input = toolUse.input as Record<string, any>;
-      printToolCall(toolUse.name, input);
-
-      // 权限检查（详见第 6 章）
-      const perm = checkPermission(toolUse.name, input, this.permissionMode, this.planFilePath);
-      if (perm.action === "deny") {
-        toolResults.push({ type: "tool_result", tool_use_id: toolUse.id,
-          content: `Action denied: ${perm.message}` });
-        continue;
-      }
-      if (perm.action === "confirm" && perm.message && !this.confirmedPaths.has(perm.message)) {
-        const confirmed = await this.confirmDangerous(perm.message);
-        if (!confirmed) {
-          toolResults.push({ type: "tool_result", tool_use_id: toolUse.id,
-            content: "User denied this action." });
-          continue;
-        }
-        this.confirmedPaths.add(perm.message);
-      }
-
-      const result = await executeTool(toolUse.name, input);
-      printToolResult(toolUse.name, result);
-      toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
-    }
-
-    // 工具结果以 user 消息推入（Anthropic API 要求）
-    this.anthropicMessages.push({ role: "user", content: toolResults });
+    this.messages.push({ role: "user", content: results });
   }
 }
 ```
+<!-- @endsnippet -->
 #### **Python**
+<!-- @snippet lang=py file=agent.py region=loop step=1 -->
 ```python
-# agent.py — _chat_anthropic 方法（核心 Agent Loop）
-
-async def _chat_anthropic(self, user_message: str) -> None:
-    self._anthropic_messages.append({"role": "user", "content": user_message})
-    # 在 turn boundary 触发 auto-compact：此时最后一条是纯文本 user，
-    # _compact_anthropic 内部的 [:-1] 不会切断 tool_use ↔ tool_result 配对（详见第 7 章）
-    await self._check_and_compact()
+def chat(self, user_text: str) -> None:
+    self.messages.append({"role": "user", "content": user_text})
 
     while True:
-        if self._aborted:
-            break
+        kwargs = dict(model=MODEL, max_tokens=4096, tools=tool_definitions, messages=self.messages)
+        kwargs["system"] = SYSTEM_PROMPT
 
-        self._run_compression_pipeline()
-        response = await self._call_anthropic_stream()
+        # Ask the model for its next step. (Chapter 5 turns this into a
+        # streaming call.)
+        reply = self.client.messages.create(**kwargs)
 
-        self.total_input_tokens += response.usage.input_tokens
-        self.total_output_tokens += response.usage.output_tokens
-        self.last_input_token_count = response.usage.input_tokens
+        # Print the assistant's text.
+        for block in reply.content:
+            if block.type == "text":
+                print(block.text, end="", flush=True)
+        print()
 
-        tool_uses = [b for b in response.content if b.type == "tool_use"]
+        # Record the assistant's full reply (text + any tool calls).
+        self.messages.append({"role": "assistant", "content": reply.content})
 
-        self._anthropic_messages.append({
-            "role": "assistant",
-            "content": [self._block_to_dict(b) for b in response.content],
-        })
-
+        tool_uses = [b for b in reply.content if b.type == "tool_use"]
+        # No tool calls means the model is done with this turn.
         if not tool_uses:
-            if not self.is_sub_agent:
-                print_cost(self.total_input_tokens, self.total_output_tokens)
-            break
+            return
 
-        tool_results = []
+        # Run every requested tool; send the outputs back as one user message.
+        results = []
         for tu in tool_uses:
-            if self._aborted:
-                break
-            inp = dict(tu.input) if hasattr(tu.input, 'items') else tu.input
-            print_tool_call(tu.name, inp)
-
-            # 权限检查（详见第 6 章）
-            perm = check_permission(tu.name, inp, self.permission_mode, self._plan_file_path)
-            if perm["action"] == "deny":
-                tool_results.append({"type": "tool_result", "tool_use_id": tu.id,
-                                     "content": f"Action denied: {perm.get('message', '')}"})
-                continue
-            if perm["action"] == "confirm" and perm.get("message") \
-               and perm["message"] not in self._confirmed_paths:
-                confirmed = await self._confirm_dangerous(perm["message"])
-                if not confirmed:
-                    tool_results.append({"type": "tool_result", "tool_use_id": tu.id,
-                                         "content": "User denied this action."})
-                    continue
-                self._confirmed_paths.add(perm["message"])
-
-            result = await self._execute_tool_call(tu.name, inp)
-            print_tool_result(tu.name, result)
-            tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result})
-
-        self._anthropic_messages.append({"role": "user", "content": tool_results})
+            print(f"  → {tu.name}({json.dumps(tu.input)})")
+            output = execute_tool(tu.name, tu.input)
+            results.append({"type": "tool_result", "tool_use_id": tu.id, "content": output})
+        self.messages.append({"role": "user", "content": results})
 ```
+<!-- @endsnippet -->
 <!-- tabs:end -->
+
+▶ 现在就跑它（不用 API key，走本地 mock 模型）：
+
+<!-- @transcript step=1 lang=ts -->
+```
+$ node steps/run.mjs 1
+  you: Read the file greeting.txt and tell me what it says.
+  → read_file({"file_path":"greeting.txt"})
+greeting.txt says: hello from step one.
+```
+<!-- @endtranscript -->
+
+模型收到「读 greeting.txt」，回了一句「我要调 read_file」；循环没有停，而是真去读了文件、把内容作为 user 消息喂回去、再调一次模型，这次它才给出答案。真实的 `agent.ts` 在这之上还叠了记忆预取、上下文压缩、流式提前执行等等，都是后面几章一层层加进去的——本章末尾再看那些。
 
 ## 消息数组是怎么长大的
 
