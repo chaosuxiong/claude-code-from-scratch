@@ -2,7 +2,9 @@
 
 ## Chapter Goals
 
-Implement cross-session memory: let the Agent maintain awareness of the user and project across multiple conversations, without relying on conversation history.
+So far the agent's "memory" is just that message array — close the session and it forgets everything, starting over next time. This chapter builds it long-term memory that survives across sessions.
+
+User preferences, project facts, and the like get written to small files on disk, one memory per file; next session, the ones relevant to the current topic are pulled back into the System Prompt by relevance, instead of hauling the whole history back.
 
 ```mermaid
 graph TB
@@ -15,33 +17,6 @@ graph TB
     style SideQuery fill:#7c5cfc,color:#fff
     style Inject fill:#e8e0ff
 ```
-
----
-
-## How Claude Code Does It
-
-The core constraint of Claude Code's memory system boils down to one rule: **only remember information that cannot be derived from the current project state**. Code patterns, architecture, file paths, git history, ongoing debugging -- these can all be obtained by reading code and `git log`, and storing them in memory only creates drift. Even information the user explicitly asks to save is no exception -- if a user says "remember this PR list," the Agent should push back: what in this list is non-derivable? A specific deadline? An unexpected finding?
-
-Memories are divided into four types:
-
-| Type | What to Remember | When to Trigger |
-|------|-----------------|----------------|
-| **user** | User identity, preferences, knowledge background | When learning about user role/preferences |
-| **feedback** | Corrections **and affirmations** of Agent behavior | When user corrects or affirms a behavior |
-| **project** | Project progress, decisions, deadlines | When learning about project dynamics |
-| **reference** | Locator information for external systems | When learning about external system locations |
-
-A closed taxonomy rather than free-form tags -- to prevent tag proliferation that leads to fuzzy matching during recall.
-
-The `feedback` type has a nuance: it records not just corrections but also user affirmations. The reasoning is practical: only recording "mistakes" helps the model avoid repeating them, but may also inadvertently cause it to abandon practices the user has already validated as good. Both types also require the body to include `Why` and `How to apply` -- because knowing "why" is essential for judging edge cases; blindly following rules often backfires.
-
-The `project` type has a specific requirement: relative dates must be converted to absolute dates. "Merge freeze after Thursday" -> "Merge freeze after 2026-03-05." Memories may be read weeks later, when "Thursday" has become meaningless.
-
-**MEMORY.md is an index, not a container.** It's loaded in full into the system prompt every session, so it must be compact -- one line per entry with a link, actual content read on demand. It has dual truncation at 200 lines / 25KB, with an appended hint when exceeded: "keep index entries to one line under ~200 chars." Error messages include fix guidance -- a design habit that runs throughout the entire system.
-
-**The recall mechanism** uses `sideQuery` to call the model for semantic matching, rather than keyword search. When a user asks about "deployment process," semantic matching can find a memory titled "CI/CD Considerations," while keyword matching cannot. Recall executes asynchronously while the model starts generating its response (`pendingMemoryPrefetch`), so the delay is nearly zero from the user's perspective. Each recall returns at most 5 entries, keeping context cost controlled.
-
-Each memory also carries a **freshness warning** -- memories older than 1 day are annotated with how many days have passed, reminding the model that memories are point-in-time snapshots, not live state. A memory saying "deadline next week" would be misleading two weeks later if the model doesn't know it might be outdated.
 
 ---
 
@@ -560,6 +535,35 @@ export function memoryFreshnessWarning(mtimeMs: number): string {
 ```
 
 The rule is simple: no prompt within 1 day (information is essentially fresh), but a warning is attached after 1 day. The warning text explicitly tells the model two things: "this is an observation from a past point in time" and "verify against current code before stating as fact." This is more effective than simply labeling "X days ago" -- it provides an action directive, not just information.
+
+---
+
+## What the Real Claude Code Does Beyond This
+
+Our memory is a pile of small files plus one relevance recall. Claude Code is far more careful about what to remember and how accurately to recall it — starting with the one core rule it sets for memory.
+
+The core constraint of Claude Code's memory system boils down to one rule: only remember information that cannot be derived from the current project state. Code patterns, architecture, file paths, git history, ongoing debugging -- these can all be obtained by reading code and `git log`, and storing them in memory only creates drift. Even information the user explicitly asks to save is no exception -- if a user says "remember this PR list," the Agent should push back: what in this list is non-derivable? A specific deadline? An unexpected finding?
+
+Memories are divided into four types:
+
+| Type | What to Remember | When to Trigger |
+|------|-----------------|----------------|
+| **user** | User identity, preferences, knowledge background | When learning about user role/preferences |
+| **feedback** | Corrections **and affirmations** of Agent behavior | When user corrects or affirms a behavior |
+| **project** | Project progress, decisions, deadlines | When learning about project dynamics |
+| **reference** | Locator information for external systems | When learning about external system locations |
+
+A closed taxonomy rather than free-form tags -- to prevent tag proliferation that leads to fuzzy matching during recall.
+
+The `feedback` type has a nuance: it records not just corrections but also user affirmations. The reasoning is practical: only recording "mistakes" helps the model avoid repeating them, but may also inadvertently cause it to abandon practices the user has already validated as good. Both types also require the body to include `Why` and `How to apply` -- because knowing "why" is essential for judging edge cases; blindly following rules often backfires.
+
+The `project` type has a specific requirement: relative dates must be converted to absolute dates. "Merge freeze after Thursday" -> "Merge freeze after 2026-03-05." Memories may be read weeks later, when "Thursday" has become meaningless.
+
+**MEMORY.md is an index, not a container.** It's loaded in full into the system prompt every session, so it must be compact -- one line per entry with a link, actual content read on demand. It has dual truncation at 200 lines / 25KB, with an appended hint when exceeded: "keep index entries to one line under ~200 chars." Error messages include fix guidance -- a design habit that runs throughout the entire system.
+
+**The recall mechanism** uses `sideQuery` to call the model for semantic matching, rather than keyword search. When a user asks about "deployment process," semantic matching can find a memory titled "CI/CD Considerations," while keyword matching cannot. Recall executes asynchronously while the model starts generating its response (`pendingMemoryPrefetch`), so the delay is nearly zero from the user's perspective. Each recall returns at most 5 entries, keeping context cost controlled.
+
+Each memory also carries a **freshness warning** -- memories older than 1 day are annotated with how many days have passed, reminding the model that memories are point-in-time snapshots, not live state. A memory saying "deadline next week" would be misleading two weeks later if the model doesn't know it might be outdated.
 
 ---
 
