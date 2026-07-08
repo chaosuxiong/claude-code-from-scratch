@@ -2,7 +2,9 @@
 
 ## Chapter Goals
 
-Define 6 core tools (read file, write file, edit file, list files, search, Shell) + 5 extension tools (skill, agent, web_fetch, tool_search, plan mode), enabling the LLM to actually operate on your codebase. Implement edit safeguards (read-before-edit + mtime checking) and deferred tools (lazy loading) mechanism.
+Last chapter's loop already catches a tool call, runs it, and feeds the result back — but there's not a single tool yet, so the model has nothing to read even when it wants to. This chapter builds the tools.
+
+A tool is really just three things: a name, a description for the model, and a function that does the work. Start from the smallest one, `read_file`, build the six core tools (read, write, edit, list, search, Shell), then add extensions like `web_fetch`, `skill`, `agent`. Along the way `edit_file` hits two traps — editing the wrong place, and clobbering someone's just-made change — plugged with read-before-edit and an mtime check. As the tool count grows, deferred (lazy-loaded) tools keep the token cost of the tool list down.
 
 ```mermaid
 graph LR
@@ -37,166 +39,9 @@ graph LR
     style RF fill:#e8e0ff
 ```
 
-## How Claude Code Does It
+## Building the Tools
 
-### Tool Interface -- The Complete Contract for Each Tool
-
-Every tool in Claude Code follows a unified `Tool` generic interface -- not a simple function signature, but a complete behavioral contract:
-
-```typescript
-type Tool<Input, Output, P extends ToolProgressData> = {
-  name: string
-  aliases?: string[]              // Deprecated aliases for smooth migration
-  maxResultSizeChars: number      // Persists to disk if exceeded
-
-  call(args, context, canUseTool, parentMessage, onProgress?): Promise<ToolResult<Output>>
-
-  description(input, options): Promise<string>  // Tool description sent to API
-  prompt(options): Promise<string>              // Usage guide injected into system prompt
-
-  inputSchema: Input              // Zod Schema (runtime validation + type inference)
-  inputJSONSchema?: ToolInputJSONSchema
-
-  isConcurrencySafe(input): boolean   // Takes input: same tool with different args can have different safety semantics
-  isReadOnly(input): boolean
-  isDestructive?(input): boolean
-  checkPermissions(input, context): Promise<PermissionResult>
-
-  renderToolUseMessage(input, options): React.ReactNode  // Each tool has its own rendering
-  renderToolResultMessage?(content, progress, options): React.ReactNode
-}
-```
-
-Several design highlights:
-
-**`isConcurrencySafe(input)` takes parameters** -- this means the same tool can have different safety semantics for different inputs. BashTool returns `isReadOnly: true` for `ls` and `false` for `rm`. Far more precise than labeling an entire tool.
-
-**`prompt()` method** -- each tool can inject its own usage guide into the system prompt. FileEditTool injects "exact match" rules, BashTool injects safe execution reminders. Tool behavior guidelines are tightly coupled with tool definitions, rather than scattered across a global prompt file.
-
-**Rendering methods** -- each tool carries its own rendering logic; adding new tools doesn't require modifying global rendering code.
-
-### buildTool Factory -- Fail-Closed Defaults
-
-```typescript
-const TOOL_DEFAULTS = {
-  isConcurrencySafe: () => false,    // Not concurrency-safe by default
-  isReadOnly: () => false,           // Has write side effects by default
-  isDestructive: () => false,
-  checkPermissions: () => ({ behavior: 'allow', updatedInput }),
-}
-```
-
-This is a **fail-closed** design: incorrectly marking a "read-only" tool as "non-read-only" results in unnecessary permission prompts (annoying but safe); the reverse error -- incorrectly marking a "write" tool as "read-only" -- could let it execute concurrently without permission checks (dangerous and subtle). Defaults can only go in the safe direction.
-
-### Tool Registration -- Three-Layer Pipeline
-
-```mermaid
-flowchart TD
-    L1["Layer 1: getAllBaseTools()<br/>Core tools via direct import<br/>+ Feature-gated conditional imports"] --> L2["Layer 2: getTools()<br/>Runtime context filtering<br/>SIMPLE mode / deny rules / isEnabled()"]
-    L2 --> L3["Layer 3: assembleToolPool()<br/>Built-in tools + MCP bridge tools<br/>Partitioned sorting + deduplication"]
-    L3 --> Final[Final Tool Pool]
-```
-
-Layer 1's feature-gated tools load via conditional `require()`:
-
-```typescript
-const SleepTool = feature('PROACTIVE') || feature('KAIROS')
-  ? require('./tools/SleepTool/SleepTool.js').SleepTool
-  : null
-```
-
-`feature()` is a compile-time macro for the Bun bundler. It evaluates to `false` in external builds, and the entire `require()` is eliminated as dead code -- internal tools physically don't exist in the external binary.
-
-Layer 3's partitioned sorting: built-in tools come first in alphabetical order, MCP tools are appended after, with no global sorting. The reason is that the API server sets a cache breakpoint after the last built-in tool, so partitioning ensures that adding MCP tools doesn't affect cache hits for built-in tools.
-
-### Tool Execution Lifecycle -- 8 Stages
-
-```mermaid
-flowchart TD
-    Input[Model outputs tool_use block] --> Find["1. Tool Lookup"]
-    Find --> Validate["2. Input Validation (Zod + business logic)"]
-    Validate --> Parallel["3. Parallel Launch"]
-
-    subgraph Parallel
-        Hook["Pre-Tool Hook"]
-        Classifier["Bash Safety Classifier"]
-    end
-
-    Parallel --> Hook
-    Parallel --> Classifier
-    Hook --> Perm["4. Permission Check (Hook->Tool->Rules->Classifier->Interactive Confirmation)"]
-    Classifier --> Perm
-
-    Perm --> Exec["5. tool.call() (streaming progress)"]
-    Exec --> Result["6. Result Processing (large results persisted to disk)"]
-    Result --> PostHook["7. Post-Tool Hook"]
-    PostHook --> Emit["8. tool_result returned to model"]
-```
-
-Several stages worth noting:
-
-**Stage 2 Two-Phase Validation**: Phase 1 is Zod Schema (field types), Phase 2 is business logic (e.g., FileEditTool checks whether old_string is unique). Separating them ensures low-cost checks run first, reducing unnecessary disk I/O.
-
-**Stage 3 Parallel Launch**: Pre-Tool Hook and Bash classifier start simultaneously, each taking tens to hundreds of milliseconds. Parallelization reduces total permission check latency.
-
-**Stage 6 Large Result Handling**: When results exceed `maxResultSizeChars`, the full content is saved to `~/claude-code/tool-results/`, and the model receives a file path + truncation indicator. It can actively retrieve content via FileReadTool when needed.
-
-> **Core design philosophy: errors are data, not exceptions.** Errors at any stage are converted into `tool_result` with `is_error: true` and returned to the model, letting the model self-correct.
-
-### Concurrency Control
-
-```typescript
-private canExecuteTool(isConcurrencySafe: boolean): boolean {
-  const executingTools = this.tools.filter(t => t.status === 'executing')
-  return (
-    executingTools.length === 0 ||
-    (isConcurrencySafe && executingTools.every(t => t.isConcurrencySafe))
-  )
-}
-```
-
-The rule is simple: non-concurrency-safe tools must execute exclusively; multiple concurrency-safe tools can run simultaneously. `StreamingToolExecutor` doesn't wait for the model to finish outputting all tool_use blocks -- as soon as it detects a complete block, it starts execution immediately. Tool execution latency is about 1 second, while model streaming output lasts 5-30 seconds, so most tools can be completely hidden within the streaming window.
-
-Concurrency cap: `MAX_TOOL_USE_CONCURRENCY = 10`.
-
-### edit_file's Core Design
-
-FileEditTool has 14 validation steps before execution (ordered by I/O cost: check in-memory state first, then access disk), with three being most critical:
-
-**Read prerequisite check**: A code-level hard constraint, not just a prompt suggestion. Execution is refused if the file hasn't been read first, ensuring the model edits based on the file's current state rather than stale memory.
-
-**External modification detection**: Uses mtime to detect whether the file was modified externally after being read (e.g., the user edited the same file in their IDE), solving a real race condition.
-
-**Config file protection**: For files like `.claude/settings.json`, validation simulates the edit and runs JSON Schema validation afterward, preventing seemingly reasonable edits from corrupting configuration format.
-
-### Why Search-and-Replace
-
-Before settling on search-and-replace, several alternatives were considered:
-
-| Approach | Fatal Flaw |
-|----------|-----------|
-| Line-number editing | Position-dependent: after inserting 3 lines the first time, all subsequent line numbers shift, requiring complex recalculation for multi-step edits |
-| AST editing | Files with syntax errors are exactly the ones that need editing most, but AST parsers error out on syntax errors |
-| Unified diff | LLMs perform poorly generating strict formats: any error in hunk header line numbers, `+`/`-`/space prefixes makes the patch inapplicable |
-| Full file rewrite | Wastes tokens on large files; model may omit unchanged code; users can't quickly review |
-| **String replacement** | None of the above flaws |
-
-The most underrated advantage of search-and-replace is **hallucination safety**: if the model provides a string that doesn't exist in the file, the tool simply fails, and the model re-reads the file to correct its memory. Full file rewrite could silently write incorrect content to the file.
-
-## Our Simplification Decisions
-
-| Claude Code's Design | Our Simplification | Reason |
-|---------------------|-------------------|--------|
-| 66+ tool classes, each in its own directory | 1 file + 6 functions | Tutorial doesn't need industrial-grade modularity |
-| 8-stage lifecycle | Direct switch dispatch + execution | Skip Hook, permission checks, classifier |
-| StreamingToolExecutor concurrency | Serial execution one by one | Avoid concurrency complexity |
-| 14-step validation pipeline | Uniqueness check + quote tolerance | Keep only the 2 most critical validations |
-| Three-tier large result limits | Single 50K truncation layer | Enough to prevent context explosion |
-| MCP 7 transports + OAuth | No MCP support | Tutorial focuses on core concepts |
-
-Core principle: **Preserve the design philosophy, cut the engineering complexity**.
-
-## Our Implementation
+A tool is three things: a name, a description for the model, and a function that does the work. The first two go in a static array (already in the exact shape the API wants); the third is an ordinary function, dispatched by name through a switch. Definitions first, then execution, then a walk through each tool — with the focus on `edit_file`, the one tool in this chapter with a real trap in it.
 
 ### Tool Definitions: Static Array
 
@@ -821,11 +666,172 @@ Workflow:
 
 We only have 2 deferred tools (plan mode), but this mechanism becomes critical when scaling to 20+ tools.
 
+## What the Real Claude Code Does Beyond This
+
+The tools above needed one array entry and one function each. Every tool in the real Claude Code is a full behavioral contract, an eight-stage execution pipeline, and a concurrency scheduler — and that gap is exactly the distance between a toy tool system and one running in production.
+
+### Tool Interface -- The Complete Contract for Each Tool
+
+Every tool in Claude Code follows a unified `Tool` generic interface -- not a simple function signature, but a complete behavioral contract:
+
+```typescript
+type Tool<Input, Output, P extends ToolProgressData> = {
+  name: string
+  aliases?: string[]              // Deprecated aliases for smooth migration
+  maxResultSizeChars: number      // Persists to disk if exceeded
+
+  call(args, context, canUseTool, parentMessage, onProgress?): Promise<ToolResult<Output>>
+
+  description(input, options): Promise<string>  // Tool description sent to API
+  prompt(options): Promise<string>              // Usage guide injected into system prompt
+
+  inputSchema: Input              // Zod Schema (runtime validation + type inference)
+  inputJSONSchema?: ToolInputJSONSchema
+
+  isConcurrencySafe(input): boolean   // Takes input: same tool with different args can have different safety semantics
+  isReadOnly(input): boolean
+  isDestructive?(input): boolean
+  checkPermissions(input, context): Promise<PermissionResult>
+
+  renderToolUseMessage(input, options): React.ReactNode  // Each tool has its own rendering
+  renderToolResultMessage?(content, progress, options): React.ReactNode
+}
+```
+
+Several design highlights:
+
+**`isConcurrencySafe(input)` takes parameters** -- this means the same tool can have different safety semantics for different inputs. BashTool returns `isReadOnly: true` for `ls` and `false` for `rm`. Far more precise than labeling an entire tool.
+
+**`prompt()` method** -- each tool can inject its own usage guide into the system prompt. FileEditTool injects "exact match" rules, BashTool injects safe execution reminders. Tool behavior guidelines are tightly coupled with tool definitions, rather than scattered across a global prompt file.
+
+**Rendering methods** -- each tool carries its own rendering logic; adding new tools doesn't require modifying global rendering code.
+
+### buildTool Factory -- Fail-Closed Defaults
+
+```typescript
+const TOOL_DEFAULTS = {
+  isConcurrencySafe: () => false,    // Not concurrency-safe by default
+  isReadOnly: () => false,           // Has write side effects by default
+  isDestructive: () => false,
+  checkPermissions: () => ({ behavior: 'allow', updatedInput }),
+}
+```
+
+This is a **fail-closed** design: incorrectly marking a "read-only" tool as "non-read-only" results in unnecessary permission prompts (annoying but safe); the reverse error -- incorrectly marking a "write" tool as "read-only" -- could let it execute concurrently without permission checks (dangerous and subtle). Defaults can only go in the safe direction.
+
+### Tool Registration -- Three-Layer Pipeline
+
+```mermaid
+flowchart TD
+    L1["Layer 1: getAllBaseTools()<br/>Core tools via direct import<br/>+ Feature-gated conditional imports"] --> L2["Layer 2: getTools()<br/>Runtime context filtering<br/>SIMPLE mode / deny rules / isEnabled()"]
+    L2 --> L3["Layer 3: assembleToolPool()<br/>Built-in tools + MCP bridge tools<br/>Partitioned sorting + deduplication"]
+    L3 --> Final[Final Tool Pool]
+```
+
+Layer 1's feature-gated tools load via conditional `require()`:
+
+```typescript
+const SleepTool = feature('PROACTIVE') || feature('KAIROS')
+  ? require('./tools/SleepTool/SleepTool.js').SleepTool
+  : null
+```
+
+`feature()` is a compile-time macro for the Bun bundler. It evaluates to `false` in external builds, and the entire `require()` is eliminated as dead code -- internal tools physically don't exist in the external binary.
+
+Layer 3's partitioned sorting: built-in tools come first in alphabetical order, MCP tools are appended after, with no global sorting. The reason is that the API server sets a cache breakpoint after the last built-in tool, so partitioning ensures that adding MCP tools doesn't affect cache hits for built-in tools.
+
+### Tool Execution Lifecycle -- 8 Stages
+
+```mermaid
+flowchart TD
+    Input[Model outputs tool_use block] --> Find["1. Tool Lookup"]
+    Find --> Validate["2. Input Validation (Zod + business logic)"]
+    Validate --> Parallel["3. Parallel Launch"]
+
+    subgraph Parallel
+        Hook["Pre-Tool Hook"]
+        Classifier["Bash Safety Classifier"]
+    end
+
+    Parallel --> Hook
+    Parallel --> Classifier
+    Hook --> Perm["4. Permission Check (Hook->Tool->Rules->Classifier->Interactive Confirmation)"]
+    Classifier --> Perm
+
+    Perm --> Exec["5. tool.call() (streaming progress)"]
+    Exec --> Result["6. Result Processing (large results persisted to disk)"]
+    Result --> PostHook["7. Post-Tool Hook"]
+    PostHook --> Emit["8. tool_result returned to model"]
+```
+
+Several stages worth noting:
+
+**Stage 2 Two-Phase Validation**: Phase 1 is Zod Schema (field types), Phase 2 is business logic (e.g., FileEditTool checks whether old_string is unique). Separating them ensures low-cost checks run first, reducing unnecessary disk I/O.
+
+**Stage 3 Parallel Launch**: Pre-Tool Hook and Bash classifier start simultaneously, each taking tens to hundreds of milliseconds. Parallelization reduces total permission check latency.
+
+**Stage 6 Large Result Handling**: When results exceed `maxResultSizeChars`, the full content is saved to `~/claude-code/tool-results/`, and the model receives a file path + truncation indicator. It can actively retrieve content via FileReadTool when needed.
+
+> **Core design philosophy: errors are data, not exceptions.** Errors at any stage are converted into `tool_result` with `is_error: true` and returned to the model, letting the model self-correct.
+
+### Concurrency Control
+
+```typescript
+private canExecuteTool(isConcurrencySafe: boolean): boolean {
+  const executingTools = this.tools.filter(t => t.status === 'executing')
+  return (
+    executingTools.length === 0 ||
+    (isConcurrencySafe && executingTools.every(t => t.isConcurrencySafe))
+  )
+}
+```
+
+The rule is simple: non-concurrency-safe tools must execute exclusively; multiple concurrency-safe tools can run simultaneously. `StreamingToolExecutor` doesn't wait for the model to finish outputting all tool_use blocks -- as soon as it detects a complete block, it starts execution immediately. Tool execution latency is about 1 second, while model streaming output lasts 5-30 seconds, so most tools can be completely hidden within the streaming window.
+
+Concurrency cap: `MAX_TOOL_USE_CONCURRENCY = 10`.
+
+### edit_file's Core Design
+
+FileEditTool has 14 validation steps before execution (ordered by I/O cost: check in-memory state first, then access disk), with three being most critical:
+
+**Read prerequisite check**: A code-level hard constraint, not just a prompt suggestion. Execution is refused if the file hasn't been read first, ensuring the model edits based on the file's current state rather than stale memory.
+
+**External modification detection**: Uses mtime to detect whether the file was modified externally after being read (e.g., the user edited the same file in their IDE), solving a real race condition.
+
+**Config file protection**: For files like `.claude/settings.json`, validation simulates the edit and runs JSON Schema validation afterward, preventing seemingly reasonable edits from corrupting configuration format.
+
+### Why Search-and-Replace
+
+Before settling on search-and-replace, several alternatives were considered:
+
+| Approach | Fatal Flaw |
+|----------|-----------|
+| Line-number editing | Position-dependent: after inserting 3 lines the first time, all subsequent line numbers shift, requiring complex recalculation for multi-step edits |
+| AST editing | Files with syntax errors are exactly the ones that need editing most, but AST parsers error out on syntax errors |
+| Unified diff | LLMs perform poorly generating strict formats: any error in hunk header line numbers, `+`/`-`/space prefixes makes the patch inapplicable |
+| Full file rewrite | Wastes tokens on large files; model may omit unchanged code; users can't quickly review |
+| **String replacement** | None of the above flaws |
+
+The most underrated advantage of search-and-replace is **hallucination safety**: if the model provides a string that doesn't exist in the file, the tool simply fails, and the model re-reads the file to correct its memory. Full file rewrite could silently write incorrect content to the file.
+
+## Our Simplification Decisions
+
+| Claude Code's Design | Our Simplification | Reason |
+|---------------------|-------------------|--------|
+| 66+ tool classes, each in its own directory | 1 file + 6 functions | Tutorial doesn't need industrial-grade modularity |
+| 8-stage lifecycle | Direct switch dispatch + execution | Skip Hook, permission checks, classifier |
+| StreamingToolExecutor concurrency | Serial execution one by one | Avoid concurrency complexity |
+| 14-step validation pipeline | Uniqueness check + quote tolerance | Keep only the 2 most critical validations |
+| Three-tier large result limits | Single 50K truncation layer | Enough to prevent context explosion |
+| MCP 7 transports + OAuth | No MCP support | Tutorial focuses on core concepts |
+
+Core principle: **Preserve the design philosophy, cut the engineering complexity**.
+
 ## Simplification Comparison
 
 | Dimension | Claude Code | mini-claude |
 |-----------|------------|-------------|
-| **Tool count** | 66+ | 13 (6 core + web_fetch + tool_search + skill + agent + 2 plan mode) |
+| **Tool count** | 66+ | 12 resident (6 core + web_fetch + tool_search + skill + agent + 2 plan mode); `/loop` dynamic temporarily mounts `schedule_wakeup` |
 | **Execution mode** | Concurrent execution + streaming early start | Parallel execution (concurrencySafe) + streaming early start |
 | **Search engine** | ripgrep (rg) | System grep |
 | **Edit validation** | 14-step pipeline + readFileTimestamps | Quote tolerance + uniqueness + diff + read-before-edit + mtime |
