@@ -2,7 +2,9 @@
 
 ## Chapter Goals
 
-Prevent conversation history from exceeding the LLM's context window: a 4-tier graduated compression pipeline, progressively escalating from lightweight truncation to full summarization.
+As Chapter 1 showed, the message array grows every turn. Run a few dozen turns and it eventually overflows the model's context window — and once it does, the API errors out and the whole turn breaks. This chapter builds context compression so the agent can keep going.
+
+Compression comes in four tiers, escalating from the lightest ("trim large tool outputs") to the heaviest ("have the model summarize the whole conversation into one paragraph"), reaching for the heavy one only when the light ones aren't enough. At the end it also wires up prefix caching — that static core split out in Chapter 3 is exactly what saves money here.
 
 ```mermaid
 graph TD
@@ -29,42 +31,6 @@ graph TD
     style T4 fill:#7c5cfc,color:#fff
     style Summary fill:#7c5cfc,color:#fff
 ```
-
-## How Claude Code Does It
-
-### Context Construction
-
-Before each API call, Claude Code assembles three categories of information into the request:
-
-**System prompt** is the most stable part, composed of attribution headers, tool schemas, security rules, etc. It contains a `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` sentinel that splits it into a static half and a dynamic half -- the static half is identical for all users and marked `scope: 'global'` for globally shared caching; the dynamic half (MCP tools, language preferences, etc.) varies by user and is not shared. This allows millions of users worldwide to share the same cached core system prompt, making it one of the primary cost optimization techniques.
-
-**System/user context** is computed once per session and memoized: git status (5 commands executed in parallel), CLAUDE.md files (traversing the directory tree upward from CWD), current date, etc. The injection order is deliberate -- system context is placed after the system prompt, and user context is prepended to the message array, ensuring the most stable content comes first to maximize cache hits.
-
-**Message history** records everything in the conversation and is the primary target of the compression pipeline. Before sending to the API, it goes through `normalizeMessagesForAPI()` to fix formatting issues: attachment reordering, handling thinking blocks, merging split messages, validating `tool_use`/`tool_result` pairing, etc.
-
-### 5-Level Compression Pipeline
-
-The design philosophy is **progressive compression**: use the cheapest methods first, only escalating to heavier weapons when necessary.
-
-**Level 1: Tool Result Budget Trimming** -- Tools declare `maxResultSizeChars` (default 50K chars); when exceeded, results are **persisted to disk**, and only a compact reference with a 2KB preview is kept in context. The choice of persistence over truncation is deliberate: no data is lost, and the model can retrieve the full file at any time using the Read tool.
-
-**Level 2: History Snip** -- A feature-gated capability that trims redundant parts of history. The amount freed is passed to subsequent autocompact threshold calculations, because after snip removes messages, the `usage` on the last assistant message still reflects the pre-snip size -- without correction, this would trigger autocompact prematurely.
-
-**Level 3: Microcompact** -- Cleans up old tool results that are no longer needed, with two paths:
-- **Cache has gone cold** (idle for more than N minutes): Directly modifies message content, replacing old tool results with placeholders. Since the cache has expired, modifications won't cause additional invalidation.
-- **Cache is still hot**: Uses the API-level `cache_edits` mechanism to delete server-side in place, without modifying local messages at all, avoiding cache prefix invalidation.
-
-**Level 4: Context Collapse** -- Projection-based folding, with the key characteristic of **not modifying original messages**, only creating a folded view. Analogous to a database View: the underlying table doesn't change, but queries see filtered results. When enabled, it suppresses Autocompact to prevent the two from competing.
-
-**Level 5: Autocompact** -- The last resort, forking a sub-Agent to call the API and generate a summary. The trigger threshold is approximately 85.5% context utilization. The compression prompt uses a two-stage "analyze-summarize" approach: first the model reasons in an `<analysis>` block, then generates a standardized `<summary>` (9 sections), and finally strips the reasoning process to keep only the summary -- a classic chain-of-thought draft technique.
-
-### Token Budget and Caching
-
-**Token estimation** never calls additional APIs: it uses the `usage` from the most recent API response as an anchor, and estimates new messages at characters / 4. This reduces error from 30%+ with pure estimation to <5%.
-
-**Prompt caching** is fragile because any byte change in the prefix causes invalidation. Claude Code maintains stability at multiple levels: static/dynamic boundary markers, beta header sticky latching (once sent, it persists regardless of feature flag changes), cache breakpoints at two spots -- the static system block and the last message (the tools array renders before system and gets cached along with its breakpoint), and rupture detection (automatic attribution when `cache_read_input_tokens` drops >5%).
-
-**Circuit breaker**: There was once a session that failed autocompact 3,272 consecutive times, wasting massive API calls. Now it stops retrying after 3 consecutive failures.
 
 ## Our Implementation
 
@@ -565,6 +531,44 @@ Cache-hit tokens aren't billed at full price: cache read is 0.1x and cache write
 
 Verified once on a real machine: two turns in a row each sending a single sentence, the first turn had `cache_creation` in the five thousands and `cache_read` at zero (cold start, cache write), and the second turn had `cache_read` filled in, almost equal to what the first turn wrote (a hit). The TS and Python versions gave essentially the same numbers.
 
+## What the Real Claude Code Does Beyond This
+
+Our compression is just four tiers, tried in order before overflow. The real Claude Code does this far more finely: how it assembles context, when to compress, which span to compress, and how not to lose the important parts when it does — every step is deliberate.
+
+### Context Construction
+
+Before each API call, Claude Code assembles three categories of information into the request:
+
+**System prompt** is the most stable part, composed of attribution headers, tool schemas, security rules, etc. It contains a `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` sentinel that splits it into a static half and a dynamic half -- the static half is identical for all users and marked `scope: 'global'` for globally shared caching; the dynamic half (MCP tools, language preferences, etc.) varies by user and is not shared. This allows millions of users worldwide to share the same cached core system prompt, making it one of the primary cost optimization techniques.
+
+**System/user context** is computed once per session and memoized: git status (5 commands executed in parallel), CLAUDE.md files (traversing the directory tree upward from CWD), current date, etc. The injection order is deliberate -- system context is placed after the system prompt, and user context is prepended to the message array, ensuring the most stable content comes first to maximize cache hits.
+
+**Message history** records everything in the conversation and is the primary target of the compression pipeline. Before sending to the API, it goes through `normalizeMessagesForAPI()` to fix formatting issues: attachment reordering, handling thinking blocks, merging split messages, validating `tool_use`/`tool_result` pairing, etc.
+
+### 5-Level Compression Pipeline
+
+The design philosophy is **progressive compression**: use the cheapest methods first, only escalating to heavier weapons when necessary.
+
+**Level 1: Tool Result Budget Trimming** -- Tools declare `maxResultSizeChars` (default 50K chars); when exceeded, results are **persisted to disk**, and only a compact reference with a 2KB preview is kept in context. The choice of persistence over truncation is deliberate: no data is lost, and the model can retrieve the full file at any time using the Read tool.
+
+**Level 2: History Snip** -- A feature-gated capability that trims redundant parts of history. The amount freed is passed to subsequent autocompact threshold calculations, because after snip removes messages, the `usage` on the last assistant message still reflects the pre-snip size -- without correction, this would trigger autocompact prematurely.
+
+**Level 3: Microcompact** -- Cleans up old tool results that are no longer needed, with two paths:
+- **Cache has gone cold** (idle for more than N minutes): Directly modifies message content, replacing old tool results with placeholders. Since the cache has expired, modifications won't cause additional invalidation.
+- **Cache is still hot**: Uses the API-level `cache_edits` mechanism to delete server-side in place, without modifying local messages at all, avoiding cache prefix invalidation.
+
+**Level 4: Context Collapse** -- Projection-based folding, with the key characteristic of **not modifying original messages**, only creating a folded view. Analogous to a database View: the underlying table doesn't change, but queries see filtered results. When enabled, it suppresses Autocompact to prevent the two from competing.
+
+**Level 5: Autocompact** -- The last resort, forking a sub-Agent to call the API and generate a summary. The trigger threshold is approximately 85.5% context utilization. The compression prompt uses a two-stage "analyze-summarize" approach: first the model reasons in an `<analysis>` block, then generates a standardized `<summary>` (9 sections), and finally strips the reasoning process to keep only the summary -- a classic chain-of-thought draft technique.
+
+### Token Budget and Caching
+
+**Token estimation** never calls additional APIs: it uses the `usage` from the most recent API response as an anchor, and estimates new messages at characters / 4. This reduces error from 30%+ with pure estimation to <5%.
+
+**Prompt caching** is fragile because any byte change in the prefix causes invalidation. Claude Code maintains stability at multiple levels: static/dynamic boundary markers, beta header sticky latching (once sent, it persists regardless of feature flag changes), cache breakpoints at two spots -- the static system block and the last message (the tools array renders before system and gets cached along with its breakpoint), and rupture detection (automatic attribution when `cache_read_input_tokens` drops >5%).
+
+**Circuit breaker**: There was once a session that failed autocompact 3,272 consecutive times, wasting massive API calls. Now it stops retrying after 3 consecutive failures.
+
 ## Comparison
 
 | Dimension | Claude Code | mini-claude |
@@ -577,7 +581,6 @@ Verified once on a real machine: two turns in a row each sending a single senten
 | **Prefix caching** | 2 explicit breakpoints (tools covered by system) + scope:global + rupture detection | 2 breakpoints (system + last message), default scope (workspace-level) |
 | **Auto-compact** | Two-stage summary + post-compression recovery + circuit breaker | Single-paragraph summary, no recovery |
 | **Overflow storage** | Disk persistence, retrievable on demand | Disk persistence (>30KB), retrievable on demand |
-
 ---
 
 > **Next chapter**: Let the Agent remember information across sessions -- the memory system.
