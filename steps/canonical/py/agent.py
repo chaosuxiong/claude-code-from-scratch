@@ -46,15 +46,21 @@ class Agent:
             kwargs["system"] = SYSTEM_PROMPT
 #endstep
 
-            # Ask the model for its next step. (Chapter 5 turns this into a
-            # streaming call.)
+#step >=5
+            # Stream the reply so text shows up as it is generated, then collect
+            # the finished message (same shape a non-streaming call would return).
+            with self.client.messages.stream(**kwargs) as stream:
+                for text in stream.text_stream:
+                    print(text, end="", flush=True)
+                reply = stream.get_final_message()
+            print()
+#step <=4
             reply = self.client.messages.create(**kwargs)
-
-            # Print the assistant's text.
             for block in reply.content:
                 if block.type == "text":
                     print(block.text, end="", flush=True)
             print()
+#endstep
 
             # Record the assistant's full reply (text + any tool calls).
             self.messages.append({"role": "assistant", "content": reply.content})

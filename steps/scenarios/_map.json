@@ -47,5 +47,17 @@
       "sessionFile": ".mini-session.json",
       "resumedFirstUser": "favorite color is blue"
     }
+  },
+  "5": {
+    "scenario": "read-a-file",
+    "expect": {
+      "toolCalls": [
+        "read_file"
+      ],
+      "toolResultsContain": [
+        "hello from step one"
+      ],
+      "finalStopReason": "end_turn"
+    }
   }
 }

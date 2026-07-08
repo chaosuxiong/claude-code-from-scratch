@@ -27,7 +27,43 @@ graph LR
     style ToolResult fill:#fff3cd
 ```
 
+> ▶ **Run this chapter**: `node steps/run.mjs 5` (no API key). Add `--diff` to see what it added over the previous chapter.
+
 ## Our Implementation
+
+Last chapter the agent called the model and waited for the whole reply (`messages.create`), so the answer appeared all at once. This chapter swaps that **one** call for a streaming one (`messages.stream`), so text shows up as it's generated. Relative to last chapter, it's just this one spot in the agent loop:
+
+<!-- @diff file=agent.ts step=5 lang=ts -->
+```diff
+@@ -36,8 +36,9 @@ export class Agent {
+       };
+ 
+-      const reply = await this.client.messages.create(request);
+-      for (const block of reply.content) {
+-        if (block.type === "text") process.stdout.write(block.text);
+-      }
++      // Stream the reply so text shows up as it is generated, then collect the
++      // finished message (same shape a non-streaming call would return).
++      const stream = this.client.messages.stream(request);
++      stream.on("text", (t) => process.stdout.write(t));
++      const reply = await stream.finalMessage();
+       process.stdout.write("\n");
+```
+<!-- @enddiff -->
+
+Run it — same behavior, but the output arrives as it is generated:
+
+<!-- @transcript step=5 lang=ts -->
+```
+$ node steps/run.mjs 5
+▶ step 5 demo (no API key — local mock model)   sandbox: <sandbox>
+  you: Read the file greeting.txt and tell me what it says.
+
+
+  → read_file({"file_path":"greeting.txt"})
+greeting.txt says: hello from step one.
+```
+<!-- @endtranscript -->
 
 ### Anthropic Backend: SDK Built-in Stream
 

@@ -27,7 +27,43 @@ graph LR
     style ToolResult fill:#fff3cd
 ```
 
+> ▶ **跑这一章**：`node steps/run.mjs 5`（无需 API key）。加 `--diff` 看它比上一章多了什么。
+
 ## 我们的实现
+
+上一章 agent 调模型是一次性等完（`messages.create`），答案会「啪」地一次全出现。这一章把那**一处**调用换成流式（`messages.stream`），文字边生成边显示。相对上一章，agent 循环里就换了这一处：
+
+<!-- @diff file=agent.ts step=5 lang=ts -->
+```diff
+@@ -36,8 +36,9 @@ export class Agent {
+       };
+ 
+-      const reply = await this.client.messages.create(request);
+-      for (const block of reply.content) {
+-        if (block.type === "text") process.stdout.write(block.text);
+-      }
++      // Stream the reply so text shows up as it is generated, then collect the
++      // finished message (same shape a non-streaming call would return).
++      const stream = this.client.messages.stream(request);
++      stream.on("text", (t) => process.stdout.write(t));
++      const reply = await stream.finalMessage();
+       process.stdout.write("\n");
+```
+<!-- @enddiff -->
+
+跑一下，行为一样、只是输出边生成边来：
+
+<!-- @transcript step=5 lang=ts -->
+```
+$ node steps/run.mjs 5
+▶ step 5 demo (no API key — local mock model)   sandbox: <sandbox>
+  you: Read the file greeting.txt and tell me what it says.
+
+
+  → read_file({"file_path":"greeting.txt"})
+greeting.txt says: hello from step one.
+```
+<!-- @endtranscript -->
 
 ### Anthropic 后端：SDK 内置 stream
 

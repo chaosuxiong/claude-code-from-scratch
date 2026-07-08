@@ -104,17 +104,17 @@ async chat(userText: string): Promise<void> {
   this.messages.push({ role: "user", content: userText });
 
   while (true) {
-    // Ask the model for its next step. Passing `tools` is the one line that
-    // makes it tool-aware. (Chapter 5 turns this into a streaming call.)
-    const reply = await this.client.messages.create({
+    // Build the request once. Passing `tools` is the one line that makes the
+    // model tool-aware. Chapter 5 turns the call itself into a stream.
+    const request = {
       model: MODEL,
       max_tokens: 4096,
       system: SYSTEM_PROMPT,
       tools: toolDefinitions,
       messages: this.messages,
-    });
+    };
 
-    // Print the assistant's text.
+    const reply = await this.client.messages.create(request);
     for (const block of reply.content) {
       if (block.type === "text") process.stdout.write(block.text);
     }
@@ -151,11 +151,7 @@ def chat(self, user_text: str) -> None:
         kwargs = dict(model=MODEL, max_tokens=4096, tools=tool_definitions, messages=self.messages)
         kwargs["system"] = SYSTEM_PROMPT
 
-        # Ask the model for its next step. (Chapter 5 turns this into a
-        # streaming call.)
         reply = self.client.messages.create(**kwargs)
-
-        # Print the assistant's text.
         for block in reply.content:
             if block.type == "text":
                 print(block.text, end="", flush=True)

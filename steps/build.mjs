@@ -24,6 +24,7 @@ const STEPS = [
   { n: 2, name: "02-tools" },
   { n: 3, name: "03-system-prompt" },
   { n: 4, name: "04-cli-session" },
+  { n: 5, name: "05-streaming" },
 ];
 
 // Each file, and the first step at which it exists.
