@@ -11,7 +11,11 @@ import assert from "node:assert/strict";
 import { runReplInteractive, liveKeyAvailable } from "./harness.mjs";
 
 // A capable model per backend (behavioral prompts need real tool-use ability).
-const MODEL = { anthropic: "claude-sonnet-4-5-20250929", openai: "gpt-4o" };
+// Overridable via env for other providers/gateways.
+const MODEL = {
+  anthropic: process.env.LIVE_MODEL_ANTHROPIC || "claude-sonnet-4-5-20250929",
+  openai: process.env.LIVE_MODEL_OPENAI || "gpt-5.5",
+};
 
 for (const backend of ["anthropic", "openai"]) {
   const skip = liveKeyAvailable(backend) ? false : `no ${backend} key in .env (live test skipped)`;
