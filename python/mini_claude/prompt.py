@@ -1,5 +1,15 @@
 """System prompt construction — template embedded, variable interpolation, context gathering."""
 
+# 系统提示词构建模块
+# 本模块负责构建发送给模型的系统提示词，是 Claude Code 提示词架构的精简复刻。
+# 核心设计：将系统提示词分为静态部分和动态部分，以支持前缀缓存优化。
+#   - 静态部分（static）：所有用户和会话共享的核心指令，可被缓存
+#   - 动态部分（dynamic）：每个会话独有的上下文信息（环境、Git、记忆、技能等）
+#   - 用户上下文提醒（user context reminder）：CLAUDE.md 和日期信息，注入到第一条用户消息中
+# 关键文件：
+#   - CLAUDE.md：项目级指令文件，支持 @include 引用其他文件
+#   - .claude/rules/*.md：规则目录，加载所有规则文件
+
 from __future__ import annotations
 
 import os
@@ -15,6 +25,15 @@ from .tools import get_deferred_tool_names
 
 # ─── System prompt template (embedded) ──────────────────────
 
+# 系统提示词模板（静态核心）
+# 这是所有用户和会话共享的核心指令，定义了 AI 助手的行为准则。
+# 包含以下主要部分：
+#   - 系统行为规范（输出格式、工具权限、标签处理等）
+#   - 任务执行指南（软件工程任务、代码修改、文件操作等）
+#   - 安全操作规范（可逆性评估、危险操作确认等）
+#   - 工具使用指南（专用工具优先、并行调用、子代理等）
+#   - 语气和风格（简洁、直接、避免表情符号等）
+#   - 输出效率（直奔主题、避免冗余）
 SYSTEM_PROMPT_TEMPLATE = """\
 You are Mini Claude Code, a lightweight coding assistant CLI.
 You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
@@ -91,11 +110,25 @@ import re as _re
 
 # ─── @include resolution ─────────────────────────────────────
 # Resolves @./path, @~/path, @/path references in CLAUDE.md files.
+# @include 引用解析器
+# 支持三种路径格式：
+#   - @./path — 相对于当前文件的路径
+#   - @~/path — 相对于用户主目录的路径
+#   - @/path — 绝对路径
+# 支持递归解析（最深 5 层），自动检测循环引用。
 
 _INCLUDE_RE = _re.compile(r"^@(\./[^\s]+|~/[^\s]+|/[^\s]+)$", _re.MULTILINE)
-_MAX_INCLUDE_DEPTH = 5
+_MAX_INCLUDE_DEPTH = 5  # 最大递归深度，防止无限循环
 
 
+# 解析文本中的 @include 引用
+# 将 @./path、@~/path、@/path 替换为对应文件的内容。
+# 参数：
+#   content — 包含 @include 引用的文本
+#   base_path — 相对路径的基准目录
+#   visited — 已访问文件集合，用于检测循环引用
+#   depth — 当前递归深度
+# 返回值：替换后的文本
 def _resolve_includes(
     content: str,
     base_path: Path,
@@ -131,6 +164,10 @@ def _resolve_includes(
     return _INCLUDE_RE.sub(_replace, content)
 
 
+# 从 .claude/rules/ 目录加载所有规则文件
+# 遍历目录下的所有 .md 文件，解析 @include 引用，
+# 将每个规则文件的内容用注释标记后拼接。
+# 返回值：格式化的规则文本，无规则文件时返回空字符串。
 def _load_rules_dir(directory: Path) -> str:
     """Load all .md files from .claude/rules/ directory."""
     rules_dir = directory / ".claude" / "rules"
@@ -153,6 +190,11 @@ def _load_rules_dir(directory: Path) -> str:
         return ""
 
 
+# 从当前目录向上遍历，收集所有 CLAUDE.md 文件
+# 从 cwd 开始向上逐级查找 CLAUDE.md 文件，解析其中的 @include 引用。
+# 找到的文件内容按从根到当前目录的顺序拼接。
+# 同时加载 .claude/rules/*.md 规则文件。
+# 返回值：所有 CLAUDE.md 内容的拼接文本，无文件时返回空字符串。
 def load_claude_md() -> str:
     """Walk up from cwd collecting all CLAUDE.md files, resolving @includes."""
     parts: list[str] = []
@@ -178,6 +220,12 @@ def load_claude_md() -> str:
     return claude_md + rules
 
 
+# 获取 Git 上下文信息
+# 执行三个 Git 命令获取当前仓库状态：
+#   - git rev-parse --abbrev-ref HEAD：获取当前分支名
+#   - git log --oneline -5：获取最近 5 条提交记录
+#   - git status --short：获取工作区状态摘要
+# 返回值：格式化的 Git 上下文文本，非 Git 仓库或命令失败时返回空字符串。
 def get_git_context() -> str:
     """Get git branch, recent commits, and status."""
     try:
@@ -205,14 +253,31 @@ def get_git_context() -> str:
 # build_user_context_reminder) that the agent injects into the FIRST user
 # message — Claude Code's prependUserContext. See how-claude-code-works ch3.6
 # "前缀缓存策略".
+# 静态/动态分离的前缀缓存策略
+# Claude Code 将系统提示词分为静态和动态两部分：
+#   - 静态部分：所有用户和会话共享，可被缓存（SYSTEM_PROMPT_TEMPLATE）
+#   - 动态部分：每个会话独有的上下文（环境、Git、记忆、技能等）
+#   - 用户上下文提醒：CLAUDE.md + 日期，注入到第一条用户消息中
+# 这种分离使得静态部分可以被缓存，减少重复计算。
 
 
+# 构建静态系统提示词（所有用户共享的核心指令）
+# 这是缓存的基础块，在不同用户和会话之间完全相同。
 def build_static_system_prompt() -> str:
     """The all-users-identical core. Never changes between users or sessions,
     so it is the block we mark with cache_control."""
     return SYSTEM_PROMPT_TEMPLATE
 
 
+# 构建动态系统上下文（每个会话独有的信息）
+# 收集当前会话的环境信息，包括：
+#   - 工作目录、平台、Shell 信息
+#   - Git 上下文（分支、提交、状态）
+#   - 记忆系统说明和当前索引
+#   - 可用技能描述
+#   - 可用子代理描述
+#   - 延迟加载工具列表
+# 返回值：格式化的动态上下文文本，不被缓存。
 def build_dynamic_system_context() -> str:
     """Per-session context: stable within a session but varies by
     machine/project, so it stays uncached. Kept OUT of the static block."""
@@ -238,6 +303,11 @@ def build_dynamic_system_context() -> str:
     )
 
 
+# 构建用户上下文提醒（注入到第一条用户消息中）
+# 包含 CLAUDE.md 项目指令和当前日期，用 <system-reminder> 标签包裹。
+# 这部分内容不放在系统提示词中，而是注入到第一条用户消息，
+# 避免碎片化系统提示词缓存。
+# 类似于 Claude Code 的 prependUserContext 功能。
 def build_user_context_reminder() -> str:
     """CLAUDE.md + date, wrapped in <system-reminder>. Project-specific content
     here would fragment the system prompt cache, so it must stay out of the
@@ -258,6 +328,10 @@ def build_user_context_reminder() -> str:
     )
 
 
+# 构建完整的系统提示词（静态 + 动态）
+# 将静态核心和动态上下文拼接为单一字符串。
+# 用于 OpenAI 兼容后端（依赖提供商的自动前缀缓存）和备用场景。
+# Anthropic 后端使用上面的分离块，以便放置自己的 cache_control 断点。
 def build_system_prompt() -> str:
     """Combined static + dynamic prompt as a single string. Used by the
     OpenAI-compatible backend (which relies on the provider's automatic prefix
