@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Mini Claude Python 架构",
+    "subtitle": "claude-code-from-scratch/python — 核心模块与数据流",
+    "output": "claude-code-from-scratch-python-architecture.html",
+    "viewBox": [1060, 760]
+  },
+  "components": [
+    { "id": "user", "type": "external", "label": "用户", "sublabel": "终端 / REPL", "pos": [40, 40], "size": [120, 56], "tag": "交互入口" },
+    { "id": "cli", "type": "frontend", "label": "__main__.py", "sublabel": "CLI 解析 + REPL 循环", "pos": [40, 150], "size": [160, 60] },
+    { "id": "agent", "type": "backend", "label": "Agent", "sublabel": "agent.py · 核心引擎", "pos": [300, 100], "size": [200, 80], "tag": "~2100 行" },
+
+    { "id": "anthropic", "type": "cloud", "label": "Anthropic API", "sublabel": "Messages + Streaming", "pos": [700, 40], "size": [140, 56] },
+    { "id": "openai", "type": "cloud", "label": "OpenAI API", "sublabel": "Chat Completions", "pos": [700, 120], "size": [140, 56] },
+    { "id": "mcp", "type": "messagebus", "label": "MCP Servers", "sublabel": "mcp_client.py · JSON-RPC", "pos": [700, 210], "size": [140, 56] },
+
+    { "id": "tools", "type": "backend", "label": "tools.py", "sublabel": "12 工具 + 权限管道", "pos": [40, 310], "size": [150, 60], "tag": "6 种权限模式" },
+    { "id": "prompt", "type": "backend", "label": "prompt.py", "sublabel": "系统提示构建", "pos": [220, 310], "size": [150, 60], "tag": "静态/动态分离" },
+    { "id": "session", "type": "database", "label": "session.py", "sublabel": "会话持久化", "pos": [400, 310], "size": [150, 60] },
+    { "id": "memory", "type": "database", "label": "memory.py", "sublabel": "持久记忆系统", "pos": [580, 310], "size": [150, 60], "tag": "4 类型 + 语义召回" },
+
+    { "id": "skills", "type": "backend", "label": "skills.py", "sublabel": "技能发现与执行", "pos": [40, 420], "size": [150, 60] },
+    { "id": "subagent", "type": "backend", "label": "subagent.py", "sublabel": "子代理系统", "pos": [220, 420], "size": [150, 60], "tag": "3 内置类型" },
+    { "id": "mcp_client", "type": "messagebus", "label": "mcp_client.py", "sublabel": "MCP 多服务管理", "pos": [400, 420], "size": [150, 60] },
+    { "id": "autonomy", "type": "security", "label": "autonomy.py", "sublabel": "自主特性", "pos": [580, 420], "size": [150, 60], "tag": "Goal / Loop / Auto" },
+    { "id": "ui", "type": "frontend", "label": "ui.py", "sublabel": "Rich 终端 UI", "pos": [400, 530], "size": [150, 60] },
+    { "id": "frontmatter", "type": "backend", "label": "frontmatter.py", "sublabel": "YAML 解析器", "pos": [220, 530], "size": [150, 60] },
+
+    { "id": "fs_sessions", "type": "database", "label": "Sessions", "sublabel": "~/.mini-claude/sessions/", "pos": [870, 310], "size": [140, 56] },
+    { "id": "fs_memory", "type": "database", "label": "Memory Files", "sublabel": "MEMORY.md + *.md", "pos": [870, 400], "size": [140, 56] },
+    { "id": "fs_config", "type": "database", "label": "Config Files", "sublabel": ".claude/ + CLAUDE.md", "pos": [870, 490], "size": [140, 56] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "API 后端 (双引擎)", "wraps": ["anthropic", "openai"] },
+    { "kind": "region", "label": "核心引擎", "wraps": ["agent"] },
+    { "kind": "region", "label": "支撑模块层", "wraps": ["tools", "prompt", "session", "memory"] },
+    { "kind": "region", "label": "扩展能力层", "wraps": ["skills", "subagent", "mcp_client", "autonomy"] },
+    { "kind": "region", "label": "持久化存储", "wraps": ["fs_sessions", "fs_memory", "fs_config"] }
+  ],
+  "connections": [
+    { "from": "user", "to": "cli", "variant": "emphasis" },
+    { "from": "cli", "to": "agent", "variant": "emphasis" },
+    { "from": "agent", "to": "anthropic", "label": "Streaming", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "from": "agent", "to": "openai", "label": "Chat", "variant": "dashed", "fromSide": "right", "toSide": "left" },
+    { "from": "agent", "to": "mcp", "label": "JSON-RPC", "fromSide": "right", "toSide": "left" },
+    { "from": "agent", "to": "tools", "label": "执行工具", "fromSide": "bottom", "toSide": "top" },
+    { "from": "agent", "to": "prompt", "fromSide": "bottom", "toSide": "top" },
+    { "from": "agent", "to": "session", "fromSide": "bottom", "toSide": "top" },
+    { "from": "agent", "to": "memory", "fromSide": "bottom", "toSide": "top" },
+    { "from": "agent", "to": "autonomy", "label": "Auto/Goal/Loop", "variant": "security", "fromSide": "bottom", "toSide": "top" },
+    { "from": "tools", "to": "frontmatter", "variant": "dashed", "fromSide": "bottom", "toSide": "top" },
+    { "from": "prompt", "to": "skills", "variant": "dashed", "fromSide": "bottom", "toSide": "top" },
+    { "from": "prompt", "to": "subagent", "variant": "dashed", "fromSide": "bottom", "toSide": "top" },
+    { "from": "agent", "to": "mcp_client", "fromSide": "bottom", "toSide": "top" },
+    { "from": "session", "to": "fs_sessions", "variant": "dashed", "fromSide": "right", "toSide": "left", "route": "orthogonal-h" },
+    { "from": "memory", "to": "fs_memory", "variant": "dashed", "fromSide": "right", "toSide": "left", "route": "orthogonal-h" },
+    { "from": "tools", "to": "fs_config", "variant": "dashed", "fromSide": "right", "toSide": "left", "route": "orthogonal-h" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "双后端架构", "items": ["Anthropic (content blocks) + OpenAI (chat completions)", "独立消息历史: _anthropic_messages / _openai_messages", "统一的流式工具执行循环"] },
+    { "dot": "emerald", "title": "4 层上下文压缩", "items": ["budget → 截断超大结果", "snip → 替换旧结果为占位符", "microcompact → 5min 后清理空闲结果", "autocompact → 85% 窗口时 LLM 摘要"] },
+    { "dot": "rose", "title": "权限管道", "items": ["deny → plan mode → bypass → allow", "→ tool category → 危险命令检测", "→ 用户确认 / Auto Mode 分类器"] },
+    { "dot": "violet", "title": "自主特性", "items": ["/goal — stop-hook 评估循环", "/loop — 定时/动态自调速", "Auto Mode — 2 阶段 LLM 分类器门控"] },
+    { "dot": "amber", "title": "静态/动态提示分离", "items": ["静态核心: 可缓存、跨用户共享", "动态上下文: env/git/memory/skills", "CLAUDE.md 注入首条消息避免缓存碎片"] }
+  ]
+}
